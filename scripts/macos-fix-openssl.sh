@@ -50,14 +50,10 @@ daemonctl_path="${app_path}/Contents/MacOS/codex_monitor_daemonctl"
 daemon_source="${DAEMON_BINARY_PATH:-src-tauri/target/release/codex_monitor_daemon}"
 daemonctl_source="${DAEMONCTL_BINARY_PATH:-src-tauri/target/release/codex_monitor_daemonctl}"
 
-copy_if_missing() {
+sync_embedded_binary() {
   local source_path="$1"
   local destination_path="$2"
   local label="$3"
-
-  if [[ -f "${destination_path}" ]]; then
-    return
-  fi
 
   if [[ -f "${source_path}" ]]; then
     cp -f "${source_path}" "${destination_path}"
@@ -68,8 +64,8 @@ copy_if_missing() {
   fi
 }
 
-copy_if_missing "${daemon_source}" "${daemon_path}" "daemon"
-copy_if_missing "${daemonctl_source}" "${daemonctl_path}" "daemonctl"
+sync_embedded_binary "${daemon_source}" "${daemon_path}" "daemon"
+sync_embedded_binary "${daemonctl_source}" "${daemonctl_path}" "daemonctl"
 
 if [[ ! -f "${libssl}" || ! -f "${libcrypto}" ]]; then
   echo "OpenSSL dylibs not found at ${openssl_prefix}/lib"
