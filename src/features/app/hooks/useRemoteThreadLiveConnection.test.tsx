@@ -565,6 +565,46 @@ describe("useRemoteThreadLiveConnection", () => {
     expect(refreshThread).toHaveBeenCalledWith("ws-1", "thread-2");
   });
 
+  it("refreshes the active thread when the backend reconnects", async () => {
+    const refreshThread = vi.fn().mockResolvedValue(undefined);
+    const workspace = {
+      id: "ws-1",
+      name: "Workspace",
+      path: "/tmp/ws-1",
+      connected: true,
+      settings: { sidebarCollapsed: false },
+    };
+
+    renderHook(() =>
+      useRemoteThreadLiveConnection({
+        backendMode: "remote",
+        activeWorkspace: workspace,
+        activeThreadId: "thread-1",
+        activeThreadHasLocalSnapshot: true,
+        refreshThread,
+      }),
+    );
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    refreshThread.mockClear();
+
+    await act(async () => {
+      for (const listener of appServerListeners) {
+        listener({
+          workspace_id: "ws-1",
+          method: "codex/connected",
+          params: {},
+        });
+      }
+      await Promise.resolve();
+    });
+
+    expect(refreshThread).toHaveBeenCalledWith("ws-1", "thread-1");
+  });
+
   it("ignores self-triggered detached event during dedupe reconnect", async () => {
     const refreshThread = vi.fn().mockResolvedValue(undefined);
     const workspace = {

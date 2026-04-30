@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
 import * as Sentry from "@sentry/react";
 import type {
   CollabAgentRef,
+  ConversationItem,
   CustomPromptOption,
   DebugEntry,
   ServiceTier,
@@ -30,8 +31,10 @@ import {
   setThreadName as setThreadNameService,
 } from "@services/tauri";
 import {
+  loadThreadItems,
   makeCustomNameKey,
   saveCustomName,
+  saveThreadItems,
 } from "@threads/utils/threadStorage";
 import { getParentThreadIdFromThread } from "@threads/utils/threadRpc";
 import {
@@ -73,6 +76,92 @@ function buildWorkspaceThreadKey(workspaceId: string, threadId: string) {
 }
 
 const CASCADE_ARCHIVE_SKIP_TTL_MS = 120_000;
+const THREAD_ITEMS_PERSIST_MAX_THREADS = 40;
+const THREAD_ITEMS_PERSIST_DEBOUNCE_MS = 150;
+
+function appendThreadId(
+  rankedThreadIds: string[],
+  seenThreadIds: Set<string>,
+  threadId: string | null | undefined,
+) {
+  if (!threadId || seenThreadIds.has(threadId)) {
+    return;
+  }
+  seenThreadIds.add(threadId);
+  rankedThreadIds.push(threadId);
+}
+
+function buildPersistedThreadItems({
+  itemsByThread,
+  activeThreadIdByWorkspace,
+  threadStatusById,
+  threadsByWorkspace,
+  threadActivityByWorkspace,
+}: {
+  itemsByThread: Record<string, ConversationItem[]>;
+  activeThreadIdByWorkspace: Record<string, string | null>;
+  threadStatusById: Record<
+    string,
+    { isProcessing: boolean; processingStartedAt: number | null }
+  >;
+  threadsByWorkspace: Record<string, Array<{ id: string; updatedAt: number }>>;
+  threadActivityByWorkspace: Record<string, Record<string, number>>;
+}) {
+  const rankedThreadIds: string[] = [];
+  const seenThreadIds = new Set<string>();
+
+  Object.values(activeThreadIdByWorkspace).forEach((threadId) => {
+    appendThreadId(rankedThreadIds, seenThreadIds, threadId);
+  });
+
+  Object.entries(threadStatusById)
+    .filter(([, status]) => status.isProcessing)
+    .sort(
+      ([, left], [, right]) =>
+        (right.processingStartedAt ?? 0) - (left.processingStartedAt ?? 0),
+    )
+    .forEach(([threadId]) => {
+      appendThreadId(rankedThreadIds, seenThreadIds, threadId);
+    });
+
+  Object.values(threadsByWorkspace)
+    .flat()
+    .sort((left, right) => (right.updatedAt ?? 0) - (left.updatedAt ?? 0))
+    .forEach((thread) => {
+      appendThreadId(rankedThreadIds, seenThreadIds, thread.id);
+    });
+
+  Object.values(threadActivityByWorkspace)
+    .flatMap((activityByThread) =>
+      Object.entries(activityByThread).map(([threadId, timestamp]) => ({
+        threadId,
+        timestamp,
+      })),
+    )
+    .sort((left, right) => right.timestamp - left.timestamp)
+    .forEach(({ threadId }) => {
+      appendThreadId(rankedThreadIds, seenThreadIds, threadId);
+    });
+
+  Object.keys(itemsByThread).forEach((threadId) => {
+    appendThreadId(rankedThreadIds, seenThreadIds, threadId);
+  });
+
+  const persistedItems: Record<string, ConversationItem[]> = {};
+  let persistedCount = 0;
+  for (const threadId of rankedThreadIds) {
+    const items = itemsByThread[threadId];
+    if (!items?.length) {
+      continue;
+    }
+    persistedItems[threadId] = items;
+    persistedCount += 1;
+    if (persistedCount >= THREAD_ITEMS_PERSIST_MAX_THREADS) {
+      break;
+    }
+  }
+  return persistedItems;
+}
 
 export function useThreads({
   activeWorkspace,
@@ -98,19 +187,26 @@ export function useThreads({
     chatHistoryScrollbackItems === undefined
       ? CHAT_SCROLLBACK_DEFAULT
       : chatHistoryScrollbackItems;
+  const initialPersistedItemsByThread = useMemo(() => loadThreadItems(), []);
 
   const [state, dispatch] = useReducer(
     threadReducer,
-    maxItemsPerThread,
-    (initialMaxItemsPerThread) => ({
+    {
+      initialMaxItemsPerThread: maxItemsPerThread,
+      initialPersistedItemsByThread,
+    },
+    ({ initialMaxItemsPerThread, initialPersistedItemsByThread }) => ({
       ...initialState,
       maxItemsPerThread: initialMaxItemsPerThread,
+      itemsByThread: initialPersistedItemsByThread,
     }),
   );
   useEffect(() => {
     dispatch({ type: "setMaxItemsPerThread", maxItemsPerThread });
   }, [dispatch, maxItemsPerThread]);
   const loadedThreadsRef = useRef<Record<string, boolean>>({});
+  const snapshotGenerationByWorkspaceRef = useRef<Record<string, number>>({});
+  const snapshotGenerationByThreadRef = useRef<Record<string, number>>({});
   const replaceOnResumeRef = useRef<Record<string, boolean>>({});
   const pendingInterruptsRef = useRef<Set<string>>(new Set());
   const planByThreadRef = useRef(state.planByThread);
@@ -133,6 +229,7 @@ export function useThreads({
   const { handleUserInputSubmit } = useThreadUserInput({ dispatch });
   const {
     customNamesRef,
+    customNamesVersion,
     threadActivityRef,
     pinnedThreadsVersion,
     getCustomName,
@@ -150,6 +247,49 @@ export function useThreads({
     itemsByThread: state.itemsByThread,
     threadsByWorkspace: state.threadsByWorkspace,
   });
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return undefined;
+    }
+    const timeoutId = window.setTimeout(() => {
+      saveThreadItems(
+        buildPersistedThreadItems({
+          itemsByThread: state.itemsByThread,
+          activeThreadIdByWorkspace: state.activeThreadIdByWorkspace,
+          threadStatusById: state.threadStatusById,
+          threadsByWorkspace: state.threadsByWorkspace,
+          threadActivityByWorkspace: threadActivityRef.current,
+        }),
+      );
+    }, THREAD_ITEMS_PERSIST_DEBOUNCE_MS);
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [
+    state.activeThreadIdByWorkspace,
+    state.itemsByThread,
+    state.threadStatusById,
+    state.threadsByWorkspace,
+    threadActivityRef,
+  ]);
+
+  useEffect(() => {
+    Object.entries(state.threadsByWorkspace).forEach(([workspaceId, threads]) => {
+      threads.forEach((thread) => {
+        const customName = getCustomName(workspaceId, thread.id);
+        if (!customName || customName === thread.name) {
+          return;
+        }
+        dispatch({
+          type: "setThreadName",
+          workspaceId,
+          threadId: thread.id,
+          name: customName,
+        });
+      });
+    });
+  }, [customNamesVersion, dispatch, getCustomName, state.threadsByWorkspace]);
 
   const getCurrentRateLimits = useCallback(
     (workspaceId: string) => rateLimitsByWorkspaceRef.current[workspaceId] ?? null,
@@ -169,6 +309,62 @@ export function useThreads({
     dispatch,
     onDebug,
   });
+
+  const getWorkspaceSnapshotGeneration = useCallback(
+    (workspaceId: string) => snapshotGenerationByWorkspaceRef.current[workspaceId] ?? 0,
+    [],
+  );
+
+  const markThreadSnapshotFresh = useCallback(
+    (workspaceId: string, threadId: string) => {
+      if (!workspaceId || !threadId) {
+        return;
+      }
+      snapshotGenerationByThreadRef.current[
+        buildWorkspaceThreadKey(workspaceId, threadId)
+      ] = getWorkspaceSnapshotGeneration(workspaceId);
+    },
+    [getWorkspaceSnapshotGeneration],
+  );
+
+  const invalidateWorkspaceSnapshots = useCallback(
+    (workspaceId: string) => {
+      if (!workspaceId) {
+        return;
+      }
+      snapshotGenerationByWorkspaceRef.current[workspaceId] =
+        getWorkspaceSnapshotGeneration(workspaceId) + 1;
+    },
+    [getWorkspaceSnapshotGeneration],
+  );
+
+  const hasCurrentThreadSnapshotGeneration = useCallback(
+    (workspaceId: string | null | undefined, threadId: string | null) => {
+      if (!workspaceId || !threadId) {
+        return false;
+      }
+      const key = buildWorkspaceThreadKey(workspaceId, threadId);
+      const threadGeneration = snapshotGenerationByThreadRef.current[key];
+      if (threadGeneration === undefined) {
+        return getWorkspaceSnapshotGeneration(workspaceId) === 0;
+      }
+      return threadGeneration === getWorkspaceSnapshotGeneration(workspaceId);
+    },
+    [getWorkspaceSnapshotGeneration],
+  );
+
+  const hasAnyLocalThreadSnapshot = useCallback(
+    (threadId: string | null) => {
+      if (!threadId) {
+        return false;
+      }
+      return (
+        loadedThreadsRef.current[threadId] === true ||
+        (itemsByThreadRef.current[threadId]?.length ?? 0) > 0
+      );
+    },
+    [itemsByThreadRef, loadedThreadsRef],
+  );
 
   const { markProcessing, markReviewing, setActiveTurnId } = useThreadStatus({
     dispatch,
@@ -252,11 +448,17 @@ export function useThreads({
 
   const handleWorkspaceConnected = useCallback(
     (workspaceId: string) => {
+      invalidateWorkspaceSnapshots(workspaceId);
       onWorkspaceConnected(workspaceId);
       void refreshAccountRateLimits(workspaceId);
       void refreshAccountInfo(workspaceId);
     },
-    [onWorkspaceConnected, refreshAccountRateLimits, refreshAccountInfo],
+    [
+      invalidateWorkspaceSnapshots,
+      onWorkspaceConnected,
+      refreshAccountRateLimits,
+      refreshAccountInfo,
+    ],
   );
 
   const handleAccountUpdated = useCallback(
@@ -585,6 +787,7 @@ export function useThreads({
     applyCollabThreadLinksFromThread,
     updateThreadParent,
     onSubagentThreadDetected,
+    markThreadSnapshotFresh,
     onThreadCodexMetadataDetected,
   });
 
@@ -676,19 +879,27 @@ export function useThreads({
       if (!threadId) {
         return null;
       }
-    } else if (!loadedThreadsRef.current[threadId]) {
+    } else {
+      const hasStaleSnapshot =
+        hasAnyLocalThreadSnapshot(threadId) &&
+        !hasCurrentThreadSnapshotGeneration(activeWorkspace.id, threadId);
+      if (loadedThreadsRef.current[threadId] && !hasStaleSnapshot) {
+        return threadId;
+      }
       await ensureWorkspaceRuntimeCodexArgsBestEffort(
         activeWorkspace.id,
         threadId,
         "resume",
       );
-      await resumeThreadForWorkspace(activeWorkspace.id, threadId);
+      await resumeThreadForWorkspace(activeWorkspace.id, threadId, hasStaleSnapshot);
     }
     return threadId;
   }, [
     activeWorkspace,
     activeThreadId,
     ensureWorkspaceRuntimeCodexArgsBestEffort,
+    hasAnyLocalThreadSnapshot,
+    hasCurrentThreadSnapshotGeneration,
     resumeThreadForWorkspace,
     startThreadForWorkspace,
   ]);
@@ -705,9 +916,18 @@ export function useThreads({
         if (!threadId) {
           return null;
         }
-      } else if (!loadedThreadsRef.current[threadId]) {
+      } else {
+        const hasStaleSnapshot =
+          hasAnyLocalThreadSnapshot(threadId) &&
+          !hasCurrentThreadSnapshotGeneration(workspaceId, threadId);
+        if (loadedThreadsRef.current[threadId] && !hasStaleSnapshot) {
+          if (shouldActivate && currentActiveThreadId !== threadId) {
+            dispatch({ type: "setActiveThreadId", workspaceId, threadId });
+          }
+          return threadId;
+        }
         await ensureWorkspaceRuntimeCodexArgsBestEffort(workspaceId, threadId, "resume");
-        await resumeThreadForWorkspace(workspaceId, threadId);
+        await resumeThreadForWorkspace(workspaceId, threadId, hasStaleSnapshot);
       }
       if (shouldActivate && currentActiveThreadId !== threadId) {
         dispatch({ type: "setActiveThreadId", workspaceId, threadId });
@@ -718,6 +938,8 @@ export function useThreads({
       activeWorkspaceId,
       dispatch,
       ensureWorkspaceRuntimeCodexArgsBestEffort,
+      hasAnyLocalThreadSnapshot,
+      hasCurrentThreadSnapshotGeneration,
       loadedThreadsRef,
       resumeThreadForWorkspace,
       startThreadForWorkspace,
@@ -795,16 +1017,43 @@ export function useThreads({
   });
 
   const hasLocalThreadSnapshot = useCallback(
-    (threadId: string | null) => {
-      if (!threadId) {
+    (threadId: string | null, workspaceId?: string | null) => {
+      const targetWorkspaceId = workspaceId ?? activeWorkspaceId;
+      if (!targetWorkspaceId || !threadId) {
         return false;
       }
       return (
-        loadedThreadsRef.current[threadId] === true ||
-        (itemsByThreadRef.current[threadId]?.length ?? 0) > 0
+        loadedThreadsRef.current[threadId] === true &&
+        hasAnyLocalThreadSnapshot(threadId) &&
+        hasCurrentThreadSnapshotGeneration(targetWorkspaceId, threadId)
       );
     },
-    [itemsByThreadRef, loadedThreadsRef],
+    [
+      activeWorkspaceId,
+      hasAnyLocalThreadSnapshot,
+      hasCurrentThreadSnapshotGeneration,
+      loadedThreadsRef,
+    ],
+  );
+
+  const hasStaleThreadSnapshot = useCallback(
+    (threadId: string | null, workspaceId?: string | null) => {
+      const targetWorkspaceId = workspaceId ?? activeWorkspaceId;
+      if (!targetWorkspaceId || !threadId) {
+        return false;
+      }
+      return (
+        hasAnyLocalThreadSnapshot(threadId) &&
+        (loadedThreadsRef.current[threadId] !== true ||
+          !hasCurrentThreadSnapshotGeneration(targetWorkspaceId, threadId))
+      );
+    },
+    [
+      activeWorkspaceId,
+      hasAnyLocalThreadSnapshot,
+      hasCurrentThreadSnapshotGeneration,
+      loadedThreadsRef,
+    ],
   );
 
   const setActiveThreadId = useCallback(
@@ -826,16 +1075,17 @@ export function useThreads({
       }
       if (threadId) {
         void (async () => {
-          const hasLocalSnapshot = hasLocalThreadSnapshot(threadId);
+          const hasLocalSnapshot = hasLocalThreadSnapshot(threadId, targetId);
           if (hasLocalSnapshot) {
             loadedThreadsRef.current[threadId] = true;
             return;
           }
+          const hasStaleSnapshot = hasStaleThreadSnapshot(threadId, targetId);
           const hasActiveTurnInWorkspace = hasProcessingThreadInWorkspace(targetId);
           if (!hasActiveTurnInWorkspace) {
             await ensureWorkspaceRuntimeCodexArgsBestEffort(targetId, threadId, "resume");
           }
-          await resumeThreadForWorkspace(targetId, threadId);
+          await resumeThreadForWorkspace(targetId, threadId, hasStaleSnapshot);
         })();
       }
     },
@@ -843,12 +1093,52 @@ export function useThreads({
       activeWorkspaceId,
       ensureWorkspaceRuntimeCodexArgsBestEffort,
       hasLocalThreadSnapshot,
+      hasStaleThreadSnapshot,
       hasProcessingThreadInWorkspace,
       loadedThreadsRef,
       resumeThreadForWorkspace,
       state.activeThreadIdByWorkspace,
     ],
   );
+
+  useEffect(() => {
+    if (!activeWorkspace?.connected || !activeWorkspaceId || !activeThreadId) {
+      return;
+    }
+    if (state.threadResumeLoadingById[activeThreadId]) {
+      return;
+    }
+    const hasStaleSnapshot = hasStaleThreadSnapshot(activeThreadId, activeWorkspaceId);
+    if (!hasStaleSnapshot) {
+      return;
+    }
+
+    void (async () => {
+      const hasActiveTurnInWorkspace =
+        hasProcessingThreadInWorkspace(activeWorkspaceId);
+      if (!hasActiveTurnInWorkspace) {
+        await ensureWorkspaceRuntimeCodexArgsBestEffort(
+          activeWorkspaceId,
+          activeThreadId,
+          "resume",
+        );
+      }
+      await resumeThreadForWorkspace(
+        activeWorkspaceId,
+        activeThreadId,
+        hasStaleSnapshot,
+      );
+    })();
+  }, [
+    activeThreadId,
+    activeWorkspace?.connected,
+    activeWorkspaceId,
+    ensureWorkspaceRuntimeCodexArgsBestEffort,
+    hasProcessingThreadInWorkspace,
+    hasStaleThreadSnapshot,
+    resumeThreadForWorkspace,
+    state.threadResumeLoadingById,
+  ]);
 
   const removeThread = useCallback(
     (workspaceId: string, threadId: string) => {

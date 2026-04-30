@@ -1,16 +1,22 @@
-import { memo, useCallback } from "react";
+import { memo, useCallback, useEffect, useMemo } from "react";
 import ChevronDown from "lucide-react/dist/esm/icons/chevron-down";
+import ChevronRight from "lucide-react/dist/esm/icons/chevron-right";
 import ChevronUp from "lucide-react/dist/esm/icons/chevron-up";
 import type {
   ConversationItem,
   OpenAppTarget,
   RequestUserInputRequest,
   RequestUserInputResponse,
+  TurnPlan,
 } from "../../../types";
 import { PlanReadyFollowupMessage } from "../../app/components/PlanReadyFollowupMessage";
 import { RequestUserInputMessage } from "../../app/components/RequestUserInputMessage";
 import { useFileLinkOpener } from "../hooks/useFileLinkOpener";
-import { formatCount, parseReasoning } from "../utils/messageRenderUtils";
+import {
+  formatCount,
+  parseReasoning,
+  type MessageListEntry,
+} from "../utils/messageRenderUtils";
 import {
   DiffRow,
   ExploreRow,
@@ -20,7 +26,9 @@ import {
   ToolRow,
   UserInputRow,
   WorkingIndicator,
+  PlanRow,
 } from "./MessageRows";
+import type { MessageGroupControlsApi } from "./messageGroupControls";
 import { useMessagesViewState } from "./useMessagesViewState";
 
 type MessagesProps = {
@@ -39,6 +47,7 @@ type MessagesProps = {
   codeBlockCopyUseModifier?: boolean;
   showMessageFilePath?: boolean;
   userInputRequests?: RequestUserInputRequest[];
+  activePlan?: TurnPlan | null;
   onUserInputSubmit?: (
     request: RequestUserInputRequest,
     response: RequestUserInputResponse,
@@ -47,6 +56,7 @@ type MessagesProps = {
   onPlanSubmitChanges?: (changes: string) => void;
   onOpenThreadLink?: (threadId: string, workspaceId?: string | null) => void;
   onQuoteMessage?: (text: string) => void;
+  onGroupControlsChange?: (controls: MessageGroupControlsApi | null) => void;
 };
 
 export const Messages = memo(function Messages({
@@ -65,11 +75,13 @@ export const Messages = memo(function Messages({
   codeBlockCopyUseModifier = false,
   showMessageFilePath = true,
   userInputRequests = [],
+  activePlan = null,
   onUserInputSubmit,
   onPlanAccept,
   onPlanSubmitChanges,
   onOpenThreadLink,
   onQuoteMessage,
+  onGroupControlsChange,
 }: MessagesProps) {
   const activeUserInputRequestId =
     threadId && userInputRequests.length
@@ -111,18 +123,26 @@ export const Messages = memo(function Messages({
     toggleExpanded,
     collapsedToolGroups,
     toggleToolGroup,
+    expandedWorkGroups,
+    toggleWorkGroup,
     copiedMessageId,
     handleCopyMessage,
     handleQuoteMessage,
     reasoningMetaById,
     latestReasoningLabel,
     groupedItems,
+    groupControls,
+    expandAllGroups,
+    collapseAllGroups,
     planFollowup,
     dismissPlanFollowup,
   } = useMessagesViewState({
     items,
+    activePlan,
     threadId,
     isThinking,
+    processingStartedAt,
+    lastDurationMs,
     activeUserInputRequestId,
     hasVisibleUserInputRequest,
     onPlanAccept,
@@ -143,6 +163,32 @@ export const Messages = memo(function Messages({
         }}
       />
     ) : null;
+  const hasRenderableEntries = groupedItems.length > 0;
+
+  const liftedGroupControls = useMemo<MessageGroupControlsApi | null>(
+    () =>
+      groupControls.hasAnyGroups
+        ? {
+            hasAnyGroups: true,
+            canExpandAny: groupControls.canExpandAny,
+            canCollapseAny: groupControls.canCollapseAny,
+            expandAll: expandAllGroups,
+            collapseAll: collapseAllGroups,
+          }
+        : null,
+    [collapseAllGroups, expandAllGroups, groupControls],
+  );
+
+  useEffect(() => {
+    onGroupControlsChange?.(liftedGroupControls);
+  }, [liftedGroupControls, onGroupControlsChange]);
+
+  useEffect(
+    () => () => {
+      onGroupControlsChange?.(null);
+    },
+    [onGroupControlsChange],
+  );
 
   const renderItem = (item: ConversationItem) => {
     if (item.kind === "message") {
@@ -231,6 +277,92 @@ export const Messages = memo(function Messages({
     return null;
   };
 
+  const renderEntry = (entry: MessageListEntry) => {
+    if (entry.kind === "item") {
+      return renderItem(entry.item);
+    }
+    if (entry.kind === "toolGroup") {
+      const { group } = entry;
+      const isCollapsed = !collapsedToolGroups.has(group.id);
+      const summaryParts = [
+        formatCount(group.toolCount, "tool call", "tool calls"),
+      ];
+      if (group.messageCount > 0) {
+        summaryParts.push(formatCount(group.messageCount, "message", "messages"));
+      }
+      const summaryText = summaryParts.join(", ");
+      const groupBodyId = `tool-group-${group.id}`;
+      const ChevronIcon = isCollapsed ? ChevronDown : ChevronUp;
+      return (
+        <div
+          key={`tool-group-${group.id}`}
+          className={`tool-group ${isCollapsed ? "tool-group-collapsed" : ""}`}
+        >
+          <div className="tool-group-header">
+            <button
+              type="button"
+              className="tool-group-toggle"
+              onClick={() => toggleToolGroup(group.id)}
+              aria-expanded={!isCollapsed}
+              aria-controls={groupBodyId}
+              aria-label={isCollapsed ? "Expand tool calls" : "Collapse tool calls"}
+            >
+              <span className="tool-group-chevron" aria-hidden>
+                <ChevronIcon size={14} />
+              </span>
+              <span className="tool-group-summary">{summaryText}</span>
+            </button>
+          </div>
+          {!isCollapsed && (
+            <div className="tool-group-body" id={groupBodyId}>
+              {group.items.map(renderItem)}
+            </div>
+          )}
+        </div>
+      );
+    }
+    if (entry.kind === "plan") {
+      return (
+        <PlanRow
+          key={`plan-${entry.plan.turnId}`}
+          plan={entry.plan}
+          isActive={entry.isActive}
+        />
+      );
+    }
+    const { group } = entry;
+    const isExpanded = group.isActive || expandedWorkGroups.has(group.id);
+    const groupBodyId = `work-group-${group.id}`;
+    const ChevronIcon = isExpanded ? ChevronDown : ChevronRight;
+    return (
+      <div
+        key={`work-group-${group.id}`}
+        className={`work-group ${isExpanded ? "work-group-expanded" : "work-group-collapsed"} ${
+          group.isActive ? "work-group-active" : ""
+        }`}
+      >
+        <button
+          type="button"
+          className="work-group-toggle"
+          onClick={() => toggleWorkGroup(group.id)}
+          aria-expanded={isExpanded}
+          aria-controls={groupBodyId}
+          aria-label={isExpanded ? "Collapse work group" : "Expand work group"}
+        >
+          <span className="work-group-chevron" aria-hidden>
+            <ChevronIcon size={14} />
+          </span>
+          <span className="work-group-title">{group.title}</span>
+        </button>
+        {isExpanded && (
+          <div className="work-group-body" id={groupBodyId}>
+            {group.entries.map(renderEntry)}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   return (
     <div
       className="messages messages-full"
@@ -238,66 +370,44 @@ export const Messages = memo(function Messages({
       onScroll={updateAutoScroll}
     >
       <div className="messages-inner">
-        {groupedItems.map((entry) => {
-          if (entry.kind === "toolGroup") {
-            const { group } = entry;
-            const isCollapsed = collapsedToolGroups.has(group.id);
-            const summaryParts = [
-              formatCount(group.toolCount, "tool call", "tool calls"),
-            ];
-            if (group.messageCount > 0) {
-              summaryParts.push(formatCount(group.messageCount, "message", "messages"));
-            }
-            const summaryText = summaryParts.join(", ");
-            const groupBodyId = `tool-group-${group.id}`;
-            const ChevronIcon = isCollapsed ? ChevronDown : ChevronUp;
-            return (
-              <div
-                key={`tool-group-${group.id}`}
-                className={`tool-group ${isCollapsed ? "tool-group-collapsed" : ""}`}
-              >
-                <div className="tool-group-header">
-                  <button
-                    type="button"
-                    className="tool-group-toggle"
-                    onClick={() => toggleToolGroup(group.id)}
-                    aria-expanded={!isCollapsed}
-                    aria-controls={groupBodyId}
-                    aria-label={isCollapsed ? "Expand tool calls" : "Collapse tool calls"}
-                  >
-                    <span className="tool-group-chevron" aria-hidden>
-                      <ChevronIcon size={14} />
-                    </span>
-                    <span className="tool-group-summary">{summaryText}</span>
-                  </button>
-                </div>
-                {!isCollapsed && (
-                  <div className="tool-group-body" id={groupBodyId}>
-                    {group.items.map(renderItem)}
-                  </div>
-                )}
-              </div>
-            );
-          }
-          return renderItem(entry.item);
-        })}
+        {groupControls.hasAnyGroups && !onGroupControlsChange ? (
+          <div className="messages-group-controls" aria-label="Group display controls">
+            <button
+              type="button"
+              className="messages-group-control"
+              onClick={expandAllGroups}
+              disabled={!groupControls.canExpandAny}
+            >
+              Expand all
+            </button>
+            <button
+              type="button"
+              className="messages-group-control"
+              onClick={collapseAllGroups}
+              disabled={!groupControls.canCollapseAny}
+            >
+              Collapse all
+            </button>
+          </div>
+        ) : null}
+        {groupedItems.map(renderEntry)}
         {planFollowupNode}
         {userInputNode}
         <WorkingIndicator
           isThinking={isThinking}
           processingStartedAt={processingStartedAt}
           lastDurationMs={lastDurationMs}
-          hasItems={items.length > 0}
+          hasItems={hasRenderableEntries}
           reasoningLabel={latestReasoningLabel}
           showPollingFetchStatus={showPollingFetchStatus}
           pollingIntervalMs={pollingIntervalMs}
         />
-        {!items.length && !userInputNode && !isThinking && !isLoadingMessages && (
+        {!hasRenderableEntries && !userInputNode && !isThinking && !isLoadingMessages && (
           <div className="empty messages-empty">
             {threadId ? "Send a prompt to the agent." : "Send a prompt to start a new agent."}
           </div>
         )}
-        {!items.length && !userInputNode && !isThinking && isLoadingMessages && (
+        {!hasRenderableEntries && !userInputNode && !isThinking && isLoadingMessages && (
           <div className="empty messages-empty">
             <div className="messages-loading-indicator" role="status" aria-live="polite">
               <span className="working-spinner" aria-hidden />

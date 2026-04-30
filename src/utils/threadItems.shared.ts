@@ -3,6 +3,7 @@ import { CHAT_SCROLLBACK_DEFAULT } from "./chatScrollback";
 
 export type PrepareThreadItemsOptions = {
   maxItemsPerThread?: number | null;
+  summarizeExploration?: boolean;
 };
 
 export type ExploreEntry =

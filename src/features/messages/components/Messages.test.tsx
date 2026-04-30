@@ -2,7 +2,8 @@
 import { useCallback, useState } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ConversationItem } from "../../../types";
+import type { ConversationItem, TurnPlan } from "../../../types";
+import { repairMissingTurnIds } from "@utils/threadItems";
 import { expectOpenedFileTarget } from "../test/fileLinkAssertions";
 import { Messages } from "./Messages";
 
@@ -1092,6 +1093,830 @@ describe("Messages", () => {
     expect(exploreTitle?.textContent ?? "").toContain("Explored");
   });
 
+  it("renders a completed work group collapsed above the final assistant reply", () => {
+    const items: ConversationItem[] = [
+      {
+        id: "tool-1",
+        kind: "tool",
+        toolType: "commandExecution",
+        title: "Command: rg work group src",
+        detail: "/tmp/codex",
+        status: "completed",
+        output: "matched",
+        timestampMs: 1_000,
+      },
+      {
+        id: "tool-2",
+        kind: "tool",
+        toolType: "mcpToolCall",
+        title: "Tool: jira / search",
+        detail: "{\"query\":\"CMP\"}",
+        status: "completed",
+        output: "done",
+        timestampMs: 6_000,
+      },
+      {
+        id: "msg-1",
+        kind: "message",
+        role: "assistant",
+        text: "Final answer",
+        timestampMs: 7_000,
+      },
+    ];
+
+    render(
+      <Messages
+        items={items}
+        threadId="thread-1"
+        workspaceId="ws-1"
+        isThinking={false}
+        openTargets={[]}
+        selectedOpenAppId=""
+      />,
+    );
+
+    expect(screen.getByText(/Worked for 5s/i)).toBeTruthy();
+    expect(screen.getByText("Final answer")).toBeTruthy();
+    expect(screen.queryByText(/2 tool calls/i)).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand work group" }));
+
+    expect(screen.getByText(/2 tool calls/i)).toBeTruthy();
+    expect(screen.queryByText(/rg work group src/i)).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand tool calls" }));
+
+    expect(screen.getByText(/rg work group src/i)).toBeTruthy();
+  });
+
+  it("can expand and collapse all loaded work and tool groups together", () => {
+    const items: ConversationItem[] = [
+      {
+        id: "tool-expand-1",
+        kind: "tool",
+        toolType: "commandExecution",
+        title: "Command: rg groupControls src",
+        detail: "/tmp/codex",
+        status: "completed",
+        output: "matched",
+        timestampMs: 1_000,
+      },
+      {
+        id: "tool-expand-2",
+        kind: "tool",
+        toolType: "mcpToolCall",
+        title: "Tool: bitbucket / search",
+        detail: "{\"query\":\"groupControls\"}",
+        status: "completed",
+        output: "done",
+        timestampMs: 4_000,
+      },
+      {
+        id: "msg-expand-1",
+        kind: "message",
+        role: "assistant",
+        text: "Finished wiring the controls.",
+        timestampMs: 5_000,
+      },
+    ];
+
+    render(
+      <Messages
+        items={items}
+        threadId="thread-1"
+        workspaceId="ws-1"
+        isThinking={false}
+        openTargets={[]}
+        selectedOpenAppId=""
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Expand all" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Collapse all" })).toBeTruthy();
+    expect(screen.queryByText(/2 tool calls/i)).toBeNull();
+    expect(screen.queryByText(/rg groupControls src/i)).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand all" }));
+
+    expect(screen.getByText(/2 tool calls/i)).toBeTruthy();
+    expect(screen.getByText(/rg groupControls src/i)).toBeTruthy();
+    expect(screen.getByText("Finished wiring the controls.")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Collapse all" }));
+
+    expect(screen.queryByText(/2 tool calls/i)).toBeNull();
+    expect(screen.queryByText(/rg groupControls src/i)).toBeNull();
+    expect(screen.getByText("Finished wiring the controls.")).toBeTruthy();
+  });
+
+  it("hides inline group controls when they are lifted to an external toolbar", () => {
+    const items: ConversationItem[] = [
+      {
+        id: "tool-external-1",
+        kind: "tool",
+        toolType: "commandExecution",
+        title: "Command: rg lifted controls src",
+        detail: "/tmp/codex",
+        status: "completed",
+        output: "matched",
+        timestampMs: 1_000,
+      },
+      {
+        id: "msg-external-1",
+        kind: "message",
+        role: "assistant",
+        text: "Done.",
+        timestampMs: 2_000,
+      },
+    ];
+    const onGroupControlsChange = vi.fn();
+
+    render(
+      <Messages
+        items={items}
+        threadId="thread-1"
+        workspaceId="ws-1"
+        isThinking={false}
+        openTargets={[]}
+        selectedOpenAppId=""
+        onGroupControlsChange={onGroupControlsChange}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "Expand all" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Collapse all" })).toBeNull();
+    expect(onGroupControlsChange).toHaveBeenCalled();
+    expect(onGroupControlsChange).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        hasAnyGroups: true,
+        canExpandAny: true,
+        canCollapseAny: false,
+      }),
+    );
+  });
+
+  it("collapses turn progress into a single work group and leaves the final answer visible", () => {
+    const items: ConversationItem[] = [
+      {
+        id: "user-turn-1",
+        kind: "message",
+        role: "user",
+        text: "continue",
+        turnId: "turn-1",
+        timestampMs: 1_000,
+      },
+      {
+        id: "assistant-progress-1",
+        kind: "message",
+        role: "assistant",
+        text:
+          "I'm picking up from the in-progress work-group implementation and validating the actual code paths now.",
+        turnId: "turn-1",
+        timestampMs: 4_000,
+      },
+      {
+        id: "tool-turn-1-a",
+        kind: "tool",
+        toolType: "commandExecution",
+        title: "Command: npm test -- --run src/features/messages/components/Messages.test.tsx",
+        detail: "/tmp/codex",
+        status: "completed",
+        output: "passed",
+        turnId: "turn-1",
+        timestampMs: 10_000,
+      },
+      {
+        id: "tool-turn-1-b",
+        kind: "tool",
+        toolType: "mcpToolCall",
+        title: "Tool: bitbucket / search",
+        detail: "{\"query\":\"workGroup\"}",
+        status: "completed",
+        output: "done",
+        turnId: "turn-1",
+        timestampMs: 20_000,
+      },
+      {
+        id: "assistant-final-1",
+        kind: "message",
+        role: "assistant",
+        text: "The nested transcript grouping is in much better shape now.",
+        turnId: "turn-1",
+        timestampMs: 165_000,
+      },
+    ];
+
+    render(
+      <Messages
+        items={items}
+        threadId="thread-1"
+        workspaceId="ws-1"
+        isThinking={false}
+        openTargets={[]}
+        selectedOpenAppId=""
+      />,
+    );
+
+    expect(screen.getByText("continue")).toBeTruthy();
+    expect(screen.getByText(/Worked for 2m 44s/i)).toBeTruthy();
+    expect(
+      screen.getByText("The nested transcript grouping is in much better shape now."),
+    ).toBeTruthy();
+    expect(
+      screen.queryByText(/I'm picking up from the in-progress work-group implementation/i),
+    ).toBeNull();
+    expect(
+      screen.queryByText(/npm test -- --run src\/features\/messages\/components\/Messages\.test\.tsx/i),
+    ).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand work group" }));
+
+    expect(
+      screen.getByText(/I'm picking up from the in-progress work-group implementation/i),
+    ).toBeTruthy();
+    expect(screen.getByText(/2 tool calls/i)).toBeTruthy();
+    expect(
+      screen.queryByText(/npm test -- --run src\/features\/messages\/components\/Messages\.test\.tsx/i),
+    ).toBeNull();
+  });
+
+  it("prefers lifecycle duration for the latest completed work group", () => {
+    const items: ConversationItem[] = [
+      {
+        id: "user-turn-2",
+        kind: "message",
+        role: "user",
+        text: "continue",
+        turnId: "turn-2",
+        timestampMs: 1_000,
+      },
+      {
+        id: "assistant-progress-2",
+        kind: "message",
+        role: "assistant",
+        text: "Investigating",
+        turnId: "turn-2",
+        timestampMs: 2_000,
+      },
+      {
+        id: "tool-turn-2",
+        kind: "tool",
+        toolType: "commandExecution",
+        title: "Command: npm test",
+        detail: "/tmp/codex",
+        status: "completed",
+        output: "done",
+        turnId: "turn-2",
+        timestampMs: 3_000,
+      },
+      {
+        id: "assistant-final-2",
+        kind: "message",
+        role: "assistant",
+        text: "Finished",
+        turnId: "turn-2",
+        timestampMs: 4_000,
+      },
+    ];
+
+    render(
+      <Messages
+        items={items}
+        threadId="thread-1"
+        workspaceId="ws-1"
+        isThinking={false}
+        lastDurationMs={164_000}
+        openTargets={[]}
+        selectedOpenAppId=""
+      />,
+    );
+
+    expect(screen.getByText(/Worked for 2m 44s/i)).toBeTruthy();
+  });
+
+  it("keeps the active trailing work group expanded while thinking", () => {
+    const items: ConversationItem[] = [
+      {
+        id: "tool-active-1",
+        kind: "tool",
+        toolType: "commandExecution",
+        title: "Command: npm test",
+        detail: "/tmp/codex",
+        status: "running",
+        output: "running",
+        timestampMs: 10_000,
+      },
+      {
+        id: "tool-active-2",
+        kind: "tool",
+        toolType: "mcpToolCall",
+        title: "Tool: bitbucket / search",
+        detail: "{\"query\":\"messages\"}",
+        status: "completed",
+        output: "done",
+        timestampMs: 12_000,
+      },
+    ];
+
+    render(
+      <Messages
+        items={items}
+        threadId="thread-1"
+        workspaceId="ws-1"
+        isThinking={true}
+        processingStartedAt={10_000}
+        openTargets={[]}
+        selectedOpenAppId=""
+      />,
+    );
+
+    expect(screen.getByText(/^Worked$/)).toBeTruthy();
+    expect(screen.getByText(/2 tool calls/i)).toBeTruthy();
+    expect(screen.queryByText("npm test")).toBeNull();
+  });
+
+  it("auto-collapses an active work group once the turn finishes", () => {
+    const items: ConversationItem[] = [
+      {
+        id: "user-turn-complete",
+        kind: "message",
+        role: "user",
+        text: "continue",
+        turnId: "turn-complete",
+        timestampMs: 1_000,
+      },
+      {
+        id: "assistant-turn-progress",
+        kind: "message",
+        role: "assistant",
+        text: "Checking the code paths now.",
+        turnId: "turn-complete",
+        timestampMs: 2_000,
+      },
+      {
+        id: "tool-turn-progress",
+        kind: "tool",
+        toolType: "commandExecution",
+        title: "Command: npm test",
+        detail: "/tmp/codex",
+        status: "completed",
+        output: "passed",
+        turnId: "turn-complete",
+        timestampMs: 8_000,
+      },
+      {
+        id: "assistant-turn-final",
+        kind: "message",
+        role: "assistant",
+        text: "Done.",
+        turnId: "turn-complete",
+        timestampMs: 20_000,
+      },
+    ];
+
+    const { rerender } = render(
+      <Messages
+        items={items}
+        threadId="thread-1"
+        workspaceId="ws-1"
+        isThinking={true}
+        processingStartedAt={1_000}
+        openTargets={[]}
+        selectedOpenAppId=""
+      />,
+    );
+
+    expect(screen.getByText(/^Worked$/)).toBeTruthy();
+    expect(screen.getByText("Checking the code paths now.")).toBeTruthy();
+    expect(screen.getByText("Done.")).toBeTruthy();
+
+    rerender(
+      <Messages
+        items={items}
+        threadId="thread-1"
+        workspaceId="ws-1"
+        isThinking={false}
+        lastDurationMs={19_000}
+        openTargets={[]}
+        selectedOpenAppId=""
+      />,
+    );
+
+    expect(screen.getByText(/Worked for 19s/i)).toBeTruthy();
+    expect(screen.getByText("Done.")).toBeTruthy();
+    expect(screen.queryByText("Checking the code paths now.")).toBeNull();
+  });
+
+  it("renders an interrupted turn as a collapsed work group with the stop message outside it", () => {
+    const items: ConversationItem[] = [
+      {
+        id: "user-turn-stop",
+        kind: "message",
+        role: "user",
+        text: "try some tool calls",
+        turnId: "turn-stop",
+        timestampMs: 1_000,
+      },
+      {
+        id: "assistant-turn-stop-progress",
+        kind: "message",
+        role: "assistant",
+        text: "Running a few tool calls now.",
+        turnId: "turn-stop",
+        timestampMs: 2_000,
+      },
+      {
+        id: "tool-turn-stop-a",
+        kind: "tool",
+        toolType: "commandExecution",
+        title: "Command: pwd",
+        detail: "/tmp/codex",
+        status: "completed",
+        output: "/tmp/codex",
+        turnId: "turn-stop",
+        timestampMs: 4_000,
+      },
+      {
+        id: "tool-turn-stop-b",
+        kind: "tool",
+        toolType: "commandExecution",
+        title: "Command: date",
+        detail: "/tmp/codex",
+        status: "completed",
+        output: "Tue Apr 28 23:29:41 PDT 2026",
+        turnId: "turn-stop",
+        timestampMs: 7_000,
+      },
+      {
+        id: "assistant-turn-stop-final",
+        kind: "message",
+        role: "assistant",
+        text: "Session stopped.",
+        turnId: "turn-stop",
+        timestampMs: 9_000,
+      },
+    ];
+
+    render(
+      <Messages
+        items={items}
+        threadId="thread-1"
+        workspaceId="ws-1"
+        isThinking={false}
+        lastDurationMs={8_000}
+        openTargets={[]}
+        selectedOpenAppId=""
+      />,
+    );
+
+    expect(screen.getByText("try some tool calls")).toBeTruthy();
+    expect(screen.getByText("Session stopped.")).toBeTruthy();
+    expect(screen.getByText(/Worked for 8s/i)).toBeTruthy();
+    expect(screen.queryByText("Running a few tool calls now.")).toBeNull();
+    expect(screen.queryByText(/2 tool calls/i)).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand work group" }));
+
+    expect(screen.getByText("Running a few tool calls now.")).toBeTruthy();
+    expect(screen.getByText(/2 tool calls/i)).toBeTruthy();
+  });
+
+  it("collapses a completed turn even when it ends without a final assistant reply", () => {
+    const items: ConversationItem[] = [
+      {
+        id: "user-turn-no-final",
+        kind: "message",
+        role: "user",
+        text: "continue",
+        turnId: "turn-no-final",
+        timestampMs: 1_000,
+      },
+      {
+        id: "assistant-turn-no-final-progress",
+        kind: "message",
+        role: "assistant",
+        text: "Checking the renderer behavior.",
+        turnId: "turn-no-final",
+        timestampMs: 2_000,
+      },
+      {
+        id: "tool-turn-no-final",
+        kind: "tool",
+        toolType: "commandExecution",
+        title: "Command: rg workGroup src",
+        detail: "/tmp/codex",
+        status: "completed",
+        output: "matched",
+        turnId: "turn-no-final",
+        timestampMs: 11_000,
+      },
+    ];
+
+    render(
+      <Messages
+        items={items}
+        threadId="thread-1"
+        workspaceId="ws-1"
+        isThinking={false}
+        lastDurationMs={10_000}
+        openTargets={[]}
+        selectedOpenAppId=""
+      />,
+    );
+
+    expect(screen.getByText("continue")).toBeTruthy();
+    expect(screen.getByText(/Worked for 10s/i)).toBeTruthy();
+    expect(screen.queryByText("Checking the renderer behavior.")).toBeNull();
+    expect(screen.queryByText(/rg workGroup src/i)).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand work group" }));
+
+    expect(screen.getByText("Checking the renderer behavior.")).toBeTruthy();
+    expect(screen.getByText(/rg workGroup src/i)).toBeTruthy();
+  });
+
+  it("keeps steer messages inside the compacted work group for a completed turn", () => {
+    const items: ConversationItem[] = [
+      {
+        id: "user-turn-steer",
+        kind: "message",
+        role: "user",
+        text: "Investigate this.",
+        turnId: "turn-steer",
+        timestampMs: 1_000,
+      },
+      {
+        id: "user-turn-steer-followup",
+        kind: "message",
+        role: "user",
+        text: "Focus on the restart path.",
+        turnId: "turn-steer",
+        timestampMs: 2_000,
+      },
+      {
+        id: "tool-turn-steer",
+        kind: "tool",
+        toolType: "commandExecution",
+        title: "Command: rg restart src",
+        detail: "/tmp/codex",
+        status: "completed",
+        output: "matched",
+        turnId: "turn-steer",
+        timestampMs: 5_000,
+      },
+      {
+        id: "assistant-turn-steer-final",
+        kind: "message",
+        role: "assistant",
+        text: "The restart wave is the key lead.",
+        turnId: "turn-steer",
+        timestampMs: 25_000,
+      },
+    ];
+
+    render(
+      <Messages
+        items={items}
+        threadId="thread-1"
+        workspaceId="ws-1"
+        isThinking={false}
+        openTargets={[]}
+        selectedOpenAppId=""
+      />,
+    );
+
+    expect(screen.getByText("Investigate this.")).toBeTruthy();
+    expect(screen.getByText("The restart wave is the key lead.")).toBeTruthy();
+    expect(screen.queryByText("Focus on the restart path.")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand work group" }));
+
+    expect(screen.getByText("Focus on the restart path.")).toBeTruthy();
+    expect(screen.getByText(/rg restart src/i)).toBeTruthy();
+  });
+
+  it("keeps legacy assistant commentary and tool calls inside one compacted work group", () => {
+    const items: ConversationItem[] = [
+      {
+        id: "legacy-user",
+        kind: "message",
+        role: "user",
+        text: "run a few tool calls",
+        timestampMs: 1_000,
+      },
+      {
+        id: "legacy-progress",
+        kind: "message",
+        role: "assistant",
+        text: "Running a few harmless tool calls now so you can inspect the rendering.",
+        timestampMs: 2_000,
+      },
+      {
+        id: "legacy-tool-1",
+        kind: "tool",
+        toolType: "commandExecution",
+        title: "Command: date",
+        detail: "/tmp/codex",
+        status: "completed",
+        output: "Tue Apr 28 23:24:31 PDT 2026",
+        timestampMs: 3_000,
+      },
+      {
+        id: "legacy-tool-2",
+        kind: "tool",
+        toolType: "commandExecution",
+        title: "Command: pwd",
+        detail: "/tmp/codex",
+        status: "completed",
+        output: "/Users/adamruehle/Development/mcp-testing",
+        timestampMs: 4_000,
+      },
+      {
+        id: "legacy-tool-3",
+        kind: "tool",
+        toolType: "commandExecution",
+        title: "Command: rg --files src",
+        detail: "/tmp/codex",
+        status: "completed",
+        output: "Messages.tsx",
+        timestampMs: 5_000,
+      },
+      {
+        id: "legacy-final",
+        kind: "message",
+        role: "assistant",
+        text: "Ran three tool calls so you can inspect the result.",
+        timestampMs: 6_000,
+      },
+    ];
+
+    render(
+      <Messages
+        items={items}
+        threadId="thread-1"
+        workspaceId="ws-1"
+        isThinking={false}
+        openTargets={[]}
+        selectedOpenAppId=""
+      />,
+    );
+
+    expect(screen.getByText("run a few tool calls")).toBeTruthy();
+    expect(screen.getByText("Ran three tool calls so you can inspect the result.")).toBeTruthy();
+    expect(
+      screen.queryByText(/Running a few harmless tool calls now so you can inspect the rendering/i),
+    ).toBeNull();
+    expect(screen.queryByText(/3 tool calls/i)).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand work group" }));
+
+    expect(
+      screen.getByText(/Running a few harmless tool calls now so you can inspect the rendering/i),
+    ).toBeTruthy();
+    expect(screen.getByText(/3 tool calls/i)).toBeTruthy();
+  });
+
+  it("renders repaired legacy snapshots with a visible final assistant reply after reload", () => {
+    const items = repairMissingTurnIds([
+      {
+        id: "legacy-reload-user",
+        kind: "message",
+        role: "user",
+        text: "continue",
+        timestampMs: 1_000,
+        turnId: null,
+      },
+      {
+        id: "legacy-reload-progress",
+        kind: "message",
+        role: "assistant",
+        text: "Tracing the resume path now.",
+        timestampMs: 2_000,
+        turnId: null,
+      },
+      {
+        id: "legacy-reload-tool",
+        kind: "tool",
+        toolType: "commandExecution",
+        title: "Command: rg turnId src",
+        detail: "/tmp/codex",
+        status: "completed",
+        output: "matched",
+        timestampMs: 4_000,
+        turnId: null,
+      },
+      {
+        id: "legacy-reload-final",
+        kind: "message",
+        role: "assistant",
+        text: "The trailing assistant reply is visible again.",
+        timestampMs: 10_000,
+        turnId: null,
+      },
+    ] as ConversationItem[]);
+
+    render(
+      <Messages
+        items={items}
+        threadId="thread-1"
+        workspaceId="ws-1"
+        isThinking={false}
+        openTargets={[]}
+        selectedOpenAppId=""
+      />,
+    );
+
+    expect(screen.getByText("continue")).toBeTruthy();
+    expect(screen.getByText(/Worked for 9s/i)).toBeTruthy();
+    expect(screen.getByText("The trailing assistant reply is visible again.")).toBeTruthy();
+    expect(screen.queryByText("Tracing the resume path now.")).toBeNull();
+  });
+
+  it("keeps trailing bookkeeping inside the work group and leaves the final assistant visible", () => {
+    const items: ConversationItem[] = [
+      {
+        id: "bookkeeping-user",
+        kind: "message",
+        role: "user",
+        text: "continue debugging this thread",
+        turnId: "turn-bookkeeping",
+        timestampMs: 1_000,
+      },
+      {
+        id: "bookkeeping-progress",
+        kind: "message",
+        role: "assistant",
+        text: "Tracing the real replay path now.",
+        turnId: "turn-bookkeeping",
+        timestampMs: 2_000,
+      },
+      {
+        id: "bookkeeping-tool",
+        kind: "tool",
+        toolType: "commandExecution",
+        title: "Command: rg thread/resume src",
+        detail: "/tmp/codex",
+        status: "completed",
+        output: "matched",
+        turnId: "turn-bookkeeping",
+        timestampMs: 4_000,
+      },
+      {
+        id: "bookkeeping-final",
+        kind: "message",
+        role: "assistant",
+        text: "The missing last message is caused by trailing bookkeeping items.",
+        turnId: "turn-bookkeeping",
+        timestampMs: 9_000,
+      },
+      {
+        id: "bookkeeping-compaction",
+        kind: "tool",
+        toolType: "mcpToolCall",
+        title: "Context compaction",
+        detail: "",
+        status: "completed",
+        output: "",
+        turnId: "turn-bookkeeping",
+        timestampMs: 10_000,
+      },
+      {
+        id: "bookkeeping-reasoning",
+        kind: "reasoning",
+        summary: "",
+        content: "",
+        turnId: "turn-bookkeeping",
+        timestampMs: 11_000,
+      },
+    ];
+
+    render(
+      <Messages
+        items={items}
+        threadId="thread-1"
+        workspaceId="ws-1"
+        isThinking={false}
+        openTargets={[]}
+        selectedOpenAppId=""
+      />,
+    );
+
+    expect(screen.getByText("continue debugging this thread")).toBeTruthy();
+    expect(
+      screen.getByText(
+        "The missing last message is caused by trailing bookkeeping items.",
+      ),
+    ).toBeTruthy();
+    expect(screen.getByText(/Worked for 9s/i)).toBeTruthy();
+    expect(screen.queryByText("Tracing the real replay path now.")).toBeNull();
+    expect(screen.queryByText("Context compaction")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand work group" }));
+
+    expect(screen.getByText("Tracing the real replay path now.")).toBeTruthy();
+    expect(screen.getByText(/2 tool calls/i)).toBeTruthy();
+  });
+
   it("does not merge explore items across interleaved tools", async () => {
     const items: ConversationItem[] = [
       {
@@ -1127,6 +1952,8 @@ describe("Messages", () => {
         selectedOpenAppId=""
       />,
     );
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand tool calls" }));
 
     await waitFor(() => {
       const exploreBlocks = container.querySelectorAll(".explore-inline");
@@ -1169,6 +1996,8 @@ describe("Messages", () => {
         selectedOpenAppId=""
       />,
     );
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand tool calls" }));
 
     await waitFor(() => {
       expect(container.querySelectorAll(".explore-inline").length).toBe(2);
@@ -1505,6 +2334,94 @@ describe("Messages", () => {
     );
 
     expect(screen.getByText("Plan ready")).toBeTruthy();
+  });
+
+  it("renders the active plan inline and hides the duplicate plan tool row", () => {
+    const items: ConversationItem[] = [
+      {
+        id: "plan-stream-1",
+        kind: "tool",
+        toolType: "plan",
+        title: "Plan",
+        detail: "Generating plan...",
+        status: "in_progress",
+        output: "- Step 1",
+      },
+    ];
+    const activePlan: TurnPlan = {
+      turnId: "turn-1",
+      explanation: "Investigate before editing.",
+      steps: [
+        { step: "Inspect logs", status: "completed" },
+        { step: "Patch renderer", status: "inProgress" },
+      ],
+    };
+
+    render(
+      <Messages
+        items={items}
+        activePlan={activePlan}
+        threadId="thread-1"
+        workspaceId="ws-1"
+        isThinking
+        openTargets={[]}
+        selectedOpenAppId=""
+      />,
+    );
+
+    expect(screen.getByText("Update plan")).toBeTruthy();
+    expect(screen.getByText("1/2")).toBeTruthy();
+    expect(screen.getByText("Inspect logs")).toBeTruthy();
+    expect(screen.getByText("Patch renderer")).toBeTruthy();
+    expect(screen.queryByText("Generating plan...")).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Export .md" }),
+    ).toBeNull();
+  });
+
+  it("updates inline plan progress when the active plan changes", () => {
+    const activePlan: TurnPlan = {
+      turnId: "turn-1",
+      explanation: null,
+      steps: [
+        { step: "Inspect logs", status: "completed" },
+        { step: "Patch renderer", status: "inProgress" },
+      ],
+    };
+
+    const { rerender } = render(
+      <Messages
+        items={[]}
+        activePlan={activePlan}
+        threadId="thread-1"
+        workspaceId="ws-1"
+        isThinking
+        openTargets={[]}
+        selectedOpenAppId=""
+      />,
+    );
+
+    expect(screen.getByText("1/2")).toBeTruthy();
+
+    rerender(
+      <Messages
+        items={[]}
+        activePlan={{
+          ...activePlan,
+          steps: [
+            { step: "Inspect logs", status: "completed" },
+            { step: "Patch renderer", status: "completed" },
+          ],
+        }}
+        threadId="thread-1"
+        workspaceId="ws-1"
+        isThinking
+        openTargets={[]}
+        selectedOpenAppId=""
+      />,
+    );
+
+    expect(screen.getByText("2/2")).toBeTruthy();
   });
 
   it("calls the plan follow-up callbacks", () => {

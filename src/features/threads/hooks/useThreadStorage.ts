@@ -20,6 +20,7 @@ type UseThreadStorageResult = {
   customNamesRef: MutableRefObject<CustomNamesMap>;
   pinnedThreadsRef: MutableRefObject<PinnedThreadsMap>;
   threadActivityRef: MutableRefObject<ThreadActivityMap>;
+  customNamesVersion: number;
   pinnedThreadsVersion: number;
   getCustomName: (workspaceId: string, threadId: string) => string | undefined;
   recordThreadActivity: (
@@ -36,8 +37,9 @@ type UseThreadStorageResult = {
 export function useThreadStorage(): UseThreadStorageResult {
   const threadActivityRef = useRef<ThreadActivityMap>(loadThreadActivity());
   const pinnedThreadsRef = useRef<PinnedThreadsMap>(loadPinnedThreads());
+  const customNamesRef = useRef<CustomNamesMap>(loadCustomNames());
+  const [customNamesVersion, setCustomNamesVersion] = useState(0);
   const [pinnedThreadsVersion, setPinnedThreadsVersion] = useState(0);
-  const customNamesRef = useRef<CustomNamesMap>({});
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -47,6 +49,7 @@ export function useThreadStorage(): UseThreadStorageResult {
     const handleStorage = (event: StorageEvent) => {
       if (event.key === STORAGE_KEY_CUSTOM_NAMES) {
         customNamesRef.current = loadCustomNames();
+        setCustomNamesVersion((version) => version + 1);
       }
     };
     window.addEventListener("storage", handleStorage);
@@ -141,6 +144,7 @@ export function useThreadStorage(): UseThreadStorageResult {
     customNamesRef,
     pinnedThreadsRef,
     threadActivityRef,
+    customNamesVersion,
     pinnedThreadsVersion,
     getCustomName,
     recordThreadActivity,

@@ -49,6 +49,7 @@ pub(crate) struct WorkspaceIdRequest {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 pub(crate) struct InitGitRepoRequest {
     pub(crate) workspace_id: String,
     pub(crate) branch: String,
@@ -57,6 +58,7 @@ pub(crate) struct InitGitRepoRequest {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 pub(crate) struct InitGitRepoRequiredRequest {
     pub(crate) workspace_id: String,
     pub(crate) branch: String,
@@ -64,6 +66,7 @@ pub(crate) struct InitGitRepoRequiredRequest {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 pub(crate) struct CreateGitHubRepoRequest {
     pub(crate) workspace_id: String,
     pub(crate) repo: String,
@@ -73,6 +76,7 @@ pub(crate) struct CreateGitHubRepoRequest {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 pub(crate) struct CreateGitHubRepoRequiredRequest {
     pub(crate) workspace_id: String,
     pub(crate) repo: String,
@@ -88,6 +92,7 @@ pub(crate) struct WorkspacePathRequest {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 pub(crate) struct ListGitRootsRequest {
     pub(crate) workspace_id: String,
     pub(crate) depth: Option<u32>,
@@ -95,6 +100,7 @@ pub(crate) struct ListGitRootsRequest {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 pub(crate) struct GetGitLogRequest {
     pub(crate) workspace_id: String,
     pub(crate) limit: Option<u32>,
@@ -130,6 +136,7 @@ pub(crate) struct WorkspaceNameRequest {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 pub(crate) struct GenerateCommitMessageRequest {
     pub(crate) workspace_id: String,
     pub(crate) commit_message_model_id: Option<String>,

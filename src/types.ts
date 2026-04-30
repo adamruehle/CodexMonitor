@@ -97,16 +97,21 @@ export type CollabAgentStatus = CollabAgentRef & {
   status: string;
 };
 
+type ConversationItemMeta = {
+  id: string;
+  turnId?: string | null;
+  timestampMs?: number | null;
+};
+
 export type ConversationItem =
-  | {
-      id: string;
+  | (ConversationItemMeta & {
       kind: "message";
       role: "user" | "assistant";
       text: string;
+      phase?: string | null;
       images?: string[];
-    }
-  | {
-      id: string;
+    })
+  | (ConversationItemMeta & {
       kind: "userInput";
       status: "answered";
       questions: {
@@ -115,18 +120,29 @@ export type ConversationItem =
         question: string;
         answers: string[];
       }[];
-    }
-  | { id: string; kind: "reasoning"; summary: string; content: string }
-  | { id: string; kind: "diff"; title: string; diff: string; status?: string }
-  | { id: string; kind: "review"; state: "started" | "completed"; text: string }
-  | {
-      id: string;
+    })
+  | (ConversationItemMeta & {
+      kind: "reasoning";
+      summary: string;
+      content: string;
+    })
+  | (ConversationItemMeta & {
+      kind: "diff";
+      title: string;
+      diff: string;
+      status?: string;
+    })
+  | (ConversationItemMeta & {
+      kind: "review";
+      state: "started" | "completed";
+      text: string;
+    })
+  | (ConversationItemMeta & {
       kind: "explore";
       status: "exploring" | "explored";
       entries: { kind: "read" | "search" | "list" | "run"; label: string; detail?: string }[];
-    }
-  | {
-      id: string;
+    })
+  | (ConversationItemMeta & {
       kind: "tool";
       toolType: string;
       title: string;
@@ -139,7 +155,7 @@ export type ConversationItem =
       collabReceiver?: CollabAgentRef;
       collabReceivers?: CollabAgentRef[];
       collabStatuses?: CollabAgentStatus[];
-    };
+    });
 
 export type ThreadSummary = {
   id: string;

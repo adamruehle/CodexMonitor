@@ -108,4 +108,41 @@ describe("useWorkspaceDropZone", () => {
 
     hook.unmount();
   });
+
+  it("accepts scaled tauri window-drop coordinates when browser dragover never fired", async () => {
+    const onDropPaths = vi.fn();
+    const hook = renderDropHook({ onDropPaths });
+
+    const target = document.createElement("div");
+    target.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, right: 100, bottom: 100 } as DOMRect);
+    hook.result.dropTargetRef.current = target;
+
+    Object.defineProperty(window, "devicePixelRatio", {
+      value: 2,
+      configurable: true,
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    if (!mockOnDragDropEvent) {
+      throw new Error("Drag drop handler not registered");
+    }
+
+    act(() => {
+      mockOnDragDropEvent?.({
+        payload: {
+          type: "drop",
+          position: { x: 160, y: 160 },
+          paths: ["/tmp/project"],
+        },
+      });
+    });
+
+    expect(onDropPaths).toHaveBeenCalledWith(["/tmp/project"]);
+
+    hook.unmount();
+  });
 });

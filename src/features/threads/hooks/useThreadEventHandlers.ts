@@ -1,4 +1,4 @@
-import { useCallback, useMemo } from "react";
+import { useCallback, useMemo, useRef } from "react";
 import type { Dispatch, MutableRefObject } from "react";
 import type {
   AppServerEvent,
@@ -82,6 +82,43 @@ export function useThreadEventHandlers({
   approvalAllowlistRef,
   pendingInterruptsRef,
 }: ThreadEventHandlersOptions) {
+  const settledTurnIdsByThreadRef = useRef<Record<string, Set<string>>>({});
+  const recentSettledThreadAtRef = useRef<Record<string, number>>({});
+
+  const markTurnSettled = useCallback((threadId: string, turnId: string | null) => {
+    recentSettledThreadAtRef.current[threadId] = Date.now();
+    if (!turnId) {
+      return;
+    }
+    const settledForThread =
+      settledTurnIdsByThreadRef.current[threadId] ?? new Set<string>();
+    settledForThread.add(turnId);
+    if (settledForThread.size > 20) {
+      const oldest = settledForThread.values().next().value;
+      if (oldest) {
+        settledForThread.delete(oldest);
+      }
+    }
+    settledTurnIdsByThreadRef.current[threadId] = settledForThread;
+  }, []);
+
+  const shouldMarkProcessingForTurn = useCallback(
+    (threadId: string, turnId: string | null) => {
+      if (turnId && settledTurnIdsByThreadRef.current[threadId]?.has(turnId)) {
+        return false;
+      }
+      if (turnId) {
+        return true;
+      }
+      if (getActiveTurnId(threadId)) {
+        return true;
+      }
+      const settledAt = recentSettledThreadAtRef.current[threadId] ?? 0;
+      return settledAt === 0 || Date.now() - settledAt > 5_000;
+    },
+    [getActiveTurnId],
+  );
+
   const onApprovalRequest = useThreadApprovalEvents({
     dispatch,
     approvalAllowlistRef,
@@ -143,6 +180,8 @@ export function useThreadEventHandlers({
   } = useThreadItemEvents({
     activeThreadId,
     dispatch,
+    getActiveTurnId,
+    shouldMarkProcessingForTurn,
     getCustomName,
     markProcessing,
     markReviewing,
@@ -179,6 +218,7 @@ export function useThreadEventHandlers({
     markReviewing,
     setActiveTurnId,
     getActiveTurnId,
+    markTurnSettled,
     pendingInterruptsRef,
     pushThreadErrorMessage,
     safeMessageActivity,

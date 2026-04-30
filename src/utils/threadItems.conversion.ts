@@ -1,6 +1,85 @@
 import type { ConversationItem } from "../types";
 import { parseCollabToolCallItem } from "./threadItems.collab";
-import { asNumber, asString } from "./threadItems.shared";
+import { asNumber, asString, normalizeThreadTimestamp } from "./threadItems.shared";
+
+function normalizeItemTimestamp(item: Record<string, unknown>) {
+  const timestamp = normalizeThreadTimestamp(
+    item.timestamp ??
+      item.timestampMs ??
+      item.timestamp_ms ??
+      item.createdAt ??
+      item.created_at ??
+      item.startedAt ??
+      item.started_at ??
+      item.updatedAt ??
+      item.updated_at,
+  );
+  return timestamp > 0 ? timestamp : null;
+}
+
+function itemMeta(
+  item: Record<string, unknown>,
+  defaults?: { turnId?: string | null; timestampMs?: number | null },
+) {
+  const turnId =
+    asString(item.turnId ?? item.turn_id ?? defaults?.turnId ?? "").trim() || null;
+  const timestampMs = normalizeItemTimestamp(item) ?? defaults?.timestampMs ?? null;
+  return {
+    turnId,
+    timestampMs,
+  };
+}
+
+function itemPhase(item: Record<string, unknown>) {
+  const phase = asString(item.phase ?? "").trim();
+  return phase || null;
+}
+
+function turnStartTimestamp(turn: Record<string, unknown>) {
+  return normalizeThreadTimestamp(
+    turn.startedAt ??
+      turn.started_at ??
+      turn.createdAt ??
+      turn.created_at ??
+      turn.updatedAt ??
+      turn.updated_at,
+  );
+}
+
+function turnEndTimestamp(turn: Record<string, unknown>) {
+  return normalizeThreadTimestamp(
+    turn.completedAt ??
+      turn.completed_at ??
+      turn.endedAt ??
+      turn.ended_at ??
+      turn.finishedAt ??
+      turn.finished_at ??
+      turn.updatedAt ??
+      turn.updated_at,
+  );
+}
+
+function fallbackTurnItemTimestamp(
+  index: number,
+  itemCount: number,
+  startTimestamp: number,
+  endTimestamp: number,
+) {
+  if (startTimestamp > 0 && endTimestamp > 0 && endTimestamp >= startTimestamp) {
+    if (itemCount <= 1) {
+      return endTimestamp;
+    }
+    const progress = index / Math.max(1, itemCount - 1);
+    return Math.round(startTimestamp + (endTimestamp - startTimestamp) * progress);
+  }
+  if (startTimestamp > 0) {
+    return startTimestamp + index;
+  }
+  if (endTimestamp > 0) {
+    return endTimestamp;
+  }
+  return null;
+}
 
 function extractImageInputValue(input: Record<string, unknown>) {
   const value =
@@ -41,8 +120,75 @@ function parseUserInputs(inputs: Array<Record<string, unknown>>) {
   return { text: textParts.join(" ").trim(), images };
 }
 
+function parseMessageContent(
+  inputs: Array<Record<string, unknown>>,
+  role: "user" | "assistant",
+) {
+  if (role === "user") {
+    const parsed = parseUserInputs(inputs);
+    if (parsed.text || parsed.images.length > 0) {
+      return parsed;
+    }
+  }
+
+  const textParts: string[] = [];
+  const images: string[] = [];
+  inputs.forEach((input) => {
+    const type = asString(input.type);
+    const text = asString(input.text).trim();
+    if (
+      text &&
+      (type === "text" ||
+        type === "input_text" ||
+        type === "output_text" ||
+        type === "")
+    ) {
+      textParts.push(text);
+      return;
+    }
+    if (
+      role === "user" &&
+      (type === "image" || type === "localImage" || type === "local_image")
+    ) {
+      const value = extractImageInputValue(input);
+      if (value) {
+        images.push(value);
+      }
+    }
+  });
+  return { text: textParts.join("\n").trim(), images };
+}
+
+function buildGenericMessageItem(
+  item: Record<string, unknown>,
+  defaults?: { turnId?: string | null; timestampMs?: number | null },
+): ConversationItem | null {
+  const id = asString(item.id);
+  const role = asString(item.role).trim().toLowerCase();
+  if (!id || (role !== "user" && role !== "assistant")) {
+    return null;
+  }
+  const content = Array.isArray(item.content) ? item.content : [];
+  const parsed = parseMessageContent(
+    content as Array<Record<string, unknown>>,
+    role as "user" | "assistant",
+  );
+  const fallbackText = asString(item.text).trim();
+  const text = parsed.text || fallbackText;
+  return {
+    id,
+    ...itemMeta(item, defaults),
+    kind: "message",
+    role: role as "user" | "assistant",
+    text,
+    phase: itemPhase(item),
+    images: role === "user" && parsed.images.length > 0 ? parsed.images : undefined,
+  };
+}
+
 export function buildConversationItem(
   item: Record<string, unknown>,
+  defaults?: { turnId?: string | null; timestampMs?: number | null },
 ): ConversationItem | null {
   const type = asString(item.type);
   const id = asString(item.id);
@@ -52,14 +198,19 @@ export function buildConversationItem(
   if (type === "agentMessage") {
     return null;
   }
+  if (type === "message") {
+    return buildGenericMessageItem(item, defaults);
+  }
   if (type === "userMessage") {
     const content = Array.isArray(item.content) ? item.content : [];
     const { text, images } = parseUserInputs(content as Array<Record<string, unknown>>);
     return {
       id,
+      ...itemMeta(item, defaults),
       kind: "message",
       role: "user",
       text,
+      phase: itemPhase(item),
       images: images.length > 0 ? images : undefined,
     };
   }
@@ -68,11 +219,12 @@ export function buildConversationItem(
     const content = Array.isArray(item.content)
       ? item.content.map((entry) => asString(entry)).join("\n")
       : asString(item.content ?? "");
-    return { id, kind: "reasoning", summary, content };
+    return { id, ...itemMeta(item, defaults), kind: "reasoning", summary, content };
   }
   if (type === "plan") {
     return {
       id,
+      ...itemMeta(item, defaults),
       kind: "tool",
       toolType: "plan",
       title: "Plan",
@@ -88,6 +240,7 @@ export function buildConversationItem(
     const durationMs = asNumber(item.durationMs ?? item.duration_ms);
     return {
       id,
+      ...itemMeta(item, defaults),
       kind: "tool",
       toolType: type,
       title: command ? `Command: ${command}` : "Command",
@@ -134,6 +287,7 @@ export function buildConversationItem(
       .join("\n\n");
     return {
       id,
+      ...itemMeta(item, defaults),
       kind: "tool",
       toolType: type,
       title: "File changes",
@@ -149,6 +303,7 @@ export function buildConversationItem(
     const args = item.arguments ? JSON.stringify(item.arguments, null, 2) : "";
     return {
       id,
+      ...itemMeta(item, defaults),
       kind: "tool",
       toolType: type,
       title: `Tool: ${server}${tool ? ` / ${tool}` : ""}`,
@@ -164,6 +319,7 @@ export function buildConversationItem(
     const status = asString(item.status ?? "").trim();
     return {
       id,
+      ...itemMeta(item, defaults),
       kind: "tool",
       toolType: type,
       title: "Web search",
@@ -175,6 +331,7 @@ export function buildConversationItem(
   if (type === "imageView") {
     return {
       id,
+      ...itemMeta(item, defaults),
       kind: "tool",
       toolType: type,
       title: "Image view",
@@ -187,6 +344,7 @@ export function buildConversationItem(
     const status = asString(item.status ?? "").trim();
     return {
       id,
+      ...itemMeta(item, defaults),
       kind: "tool",
       toolType: type,
       title: "Context compaction",
@@ -198,6 +356,7 @@ export function buildConversationItem(
   if (type === "enteredReviewMode" || type === "exitedReviewMode") {
     return {
       id,
+      ...itemMeta(item, defaults),
       kind: "review",
       state: type === "enteredReviewMode" ? "started" : "completed",
       text: asString(item.review ?? ""),
@@ -208,29 +367,37 @@ export function buildConversationItem(
 
 export function buildConversationItemFromThreadItem(
   item: Record<string, unknown>,
+  defaults?: { turnId?: string | null; timestampMs?: number | null },
 ): ConversationItem | null {
   const type = asString(item.type);
   const id = asString(item.id);
   if (!id || !type) {
     return null;
   }
+  if (type === "message") {
+    return buildGenericMessageItem(item, defaults);
+  }
   if (type === "userMessage") {
     const content = Array.isArray(item.content) ? item.content : [];
     const { text, images } = parseUserInputs(content as Array<Record<string, unknown>>);
     return {
       id,
+      ...itemMeta(item, defaults),
       kind: "message",
       role: "user",
       text,
+      phase: itemPhase(item),
       images: images.length > 0 ? images : undefined,
     };
   }
   if (type === "agentMessage") {
     return {
       id,
+      ...itemMeta(item, defaults),
       kind: "message",
       role: "assistant",
       text: asString(item.text),
+      phase: itemPhase(item),
     };
   }
   if (type === "reasoning") {
@@ -240,9 +407,9 @@ export function buildConversationItemFromThreadItem(
     const content = Array.isArray(item.content)
       ? item.content.map((entry) => asString(entry)).join("\n")
       : asString(item.content ?? "");
-    return { id, kind: "reasoning", summary, content };
+    return { id, ...itemMeta(item, defaults), kind: "reasoning", summary, content };
   }
-  return buildConversationItem(item);
+  return buildConversationItem(item, defaults);
 }
 
 export function buildItemsFromThread(thread: Record<string, unknown>) {
@@ -250,11 +417,23 @@ export function buildItemsFromThread(thread: Record<string, unknown>) {
   const items: ConversationItem[] = [];
   turns.forEach((turn) => {
     const turnRecord = turn as Record<string, unknown>;
+    const turnId = asString(turnRecord.id ?? turnRecord.turnId ?? turnRecord.turn_id).trim() || null;
+    const startTimestamp = turnStartTimestamp(turnRecord);
+    const endTimestamp = turnEndTimestamp(turnRecord);
     const turnItems = Array.isArray(turnRecord.items)
       ? (turnRecord.items as Record<string, unknown>[])
       : [];
-    turnItems.forEach((item) => {
-      const converted = buildConversationItemFromThreadItem(item);
+    turnItems.forEach((item, index) => {
+      const fallbackTimestamp = fallbackTurnItemTimestamp(
+        index,
+        turnItems.length,
+        startTimestamp,
+        endTimestamp,
+      );
+      const converted = buildConversationItemFromThreadItem(item, {
+        turnId,
+        timestampMs: fallbackTimestamp,
+      });
       if (converted) {
         items.push(converted);
       }

@@ -434,19 +434,22 @@ export function useThreadMessaging({
     }
     const activeTurnId = activeTurnIdByThread[activeThreadId] ?? null;
     const turnId = activeTurnId ?? "pending";
+    const timestamp = Date.now();
     markProcessing(activeThreadId, false);
     setActiveTurnId(activeThreadId, null);
     dispatch({
       type: "addAssistantMessage",
       threadId: activeThreadId,
       text: "Session stopped.",
+      turnId: activeTurnId,
+      timestampMs: timestamp,
     });
     if (!activeTurnId) {
       pendingInterruptsRef.current.add(activeThreadId);
     }
     onDebug?.({
-      id: `${Date.now()}-client-turn-interrupt`,
-      timestamp: Date.now(),
+      id: `${timestamp}-client-turn-interrupt`,
+      timestamp,
       source: "client",
       label: "turn/interrupt",
       payload: {

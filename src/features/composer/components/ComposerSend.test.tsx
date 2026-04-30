@@ -41,6 +41,13 @@ type HarnessProps = {
   followUpMessageBehavior?: FollowUpMessageBehavior;
   steerAvailable?: boolean;
   selectedServiceTier?: "fast" | "flex" | null;
+  messageGroupControls?: {
+    hasAnyGroups: boolean;
+    canExpandAny: boolean;
+    canCollapseAny: boolean;
+    expandAll: () => void;
+    collapseAll: () => void;
+  } | null;
 };
 
 function ComposerHarness({
@@ -50,6 +57,7 @@ function ComposerHarness({
   followUpMessageBehavior = "queue",
   steerAvailable = false,
   selectedServiceTier = null,
+  messageGroupControls = null,
 }: HarnessProps) {
   const [draftText, setDraftText] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -77,6 +85,7 @@ function ComposerHarness({
       reasoningSupported={false}
       accessMode="current"
       onSelectAccessMode={() => {}}
+      messageGroupControls={messageGroupControls}
       skills={[]}
       apps={apps}
       prompts={[]}
@@ -106,6 +115,32 @@ describe("Composer send triggers", () => {
 
     expect(onSend).toHaveBeenCalledTimes(1);
     expect(onSend).toHaveBeenCalledWith("hello world", [], undefined, "default");
+  });
+
+  it("renders lifted group controls beside the context ring", () => {
+    const onSend = vi.fn();
+    const expandAll = vi.fn();
+    const collapseAll = vi.fn();
+
+    render(
+      <ComposerHarness
+        onSend={onSend}
+        messageGroupControls={{
+          hasAnyGroups: true,
+          canExpandAny: true,
+          canCollapseAny: true,
+          expandAll,
+          collapseAll,
+        }}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand all" }));
+    fireEvent.click(screen.getByRole("button", { name: "Collapse all" }));
+
+    expect(expandAll).toHaveBeenCalledTimes(1);
+    expect(collapseAll).toHaveBeenCalledTimes(1);
+    expect(screen.getByLabelText(/Context free/i)).toBeTruthy();
   });
 
   it("sends once on send-button click", () => {

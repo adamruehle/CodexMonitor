@@ -6,14 +6,15 @@ import {
   useRef,
   useState,
 } from "react";
-import type { ConversationItem } from "../../../types";
+import type { ConversationItem, TurnPlan } from "../../../types";
 import { isPlanReadyTaggedMessage } from "../../../utils/internalPlanReadyMessages";
 import {
   SCROLL_THRESHOLD_PX,
-  buildToolGroups,
+  buildMessageEntries,
   computePlanFollowupState,
   parseReasoning,
   scrollKeyForItems,
+  type MessageListEntry,
 } from "../utils/messageRenderUtils";
 
 function toMarkdownQuote(text: string): string {
@@ -30,8 +31,11 @@ function toMarkdownQuote(text: string): string {
 
 type UseMessagesViewStateArgs = {
   items: ConversationItem[];
+  activePlan?: TurnPlan | null;
   threadId: string | null;
   isThinking: boolean;
+  processingStartedAt?: number | null;
+  lastDurationMs?: number | null;
   activeUserInputRequestId: string | number | null;
   hasVisibleUserInputRequest: boolean;
   onPlanAccept?: () => void;
@@ -41,8 +45,11 @@ type UseMessagesViewStateArgs = {
 
 export function useMessagesViewState({
   items,
+  activePlan = null,
   threadId,
   isThinking,
+  processingStartedAt = null,
+  lastDurationMs = null,
   activeUserInputRequestId,
   hasVisibleUserInputRequest,
   onPlanAccept,
@@ -54,9 +61,14 @@ export function useMessagesViewState({
   const autoScrollRef = useRef(true);
   const copyTimeoutRef = useRef<number | null>(null);
   const manuallyToggledExpandedRef = useRef<Set<string>>(new Set());
+  const manuallyToggledWorkGroupsRef = useRef<Set<string>>(new Set());
+  const activeWorkGroupIdsRef = useRef<Set<string>>(new Set());
 
   const [expandedItems, setExpandedItems] = useState<Set<string>>(new Set());
   const [collapsedToolGroups, setCollapsedToolGroups] = useState<Set<string>>(
+    new Set(),
+  );
+  const [expandedWorkGroups, setExpandedWorkGroups] = useState<Set<string>>(
     new Set(),
   );
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
@@ -64,6 +76,18 @@ export function useMessagesViewState({
     useState<Record<string, string>>({});
 
   const scrollKey = `${scrollKeyForItems(items)}-${activeUserInputRequestId ?? "no-input"}`;
+  const planKey = useMemo(() => {
+    if (!activePlan) {
+      return "no-plan";
+    }
+    return [
+      activePlan.turnId,
+      activePlan.explanation ?? "",
+      activePlan.steps
+        .map((step) => `${step.status}:${step.step}`)
+        .join("|"),
+    ].join("::");
+  }, [activePlan]);
 
   const isNearBottom = useCallback(
     (node: HTMLDivElement) =>
@@ -108,7 +132,7 @@ export function useMessagesViewState({
       return;
     }
     bottomRef.current?.scrollIntoView({ block: "end" });
-  }, [scrollKey, isThinking, isNearBottom, threadId]);
+  }, [planKey, scrollKey, isThinking, isNearBottom, threadId]);
 
   useEffect(() => {
     return () => {
@@ -133,6 +157,19 @@ export function useMessagesViewState({
 
   const toggleToolGroup = useCallback((id: string) => {
     setCollapsedToolGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  }, []);
+
+  const toggleWorkGroup = useCallback((id: string) => {
+    manuallyToggledWorkGroupsRef.current.add(id);
+    setExpandedWorkGroups((prev) => {
       const next = new Set(prev);
       if (next.has(id)) {
         next.delete(id);
@@ -203,6 +240,19 @@ export function useMessagesViewState({
     return null;
   }, [items, reasoningMetaById]);
 
+  const latestPlanToolItemId = useMemo(() => {
+    if (!activePlan) {
+      return null;
+    }
+    for (let index = items.length - 1; index >= 0; index -= 1) {
+      const item = items[index];
+      if (item.kind === "tool" && item.toolType === "plan") {
+        return item.id;
+      }
+    }
+    return null;
+  }, [activePlan, items]);
+
   const visibleItems = useMemo(
     () =>
       items.filter((item) => {
@@ -214,11 +264,19 @@ export function useMessagesViewState({
           return false;
         }
         if (item.kind !== "reasoning") {
+          if (
+            latestPlanToolItemId &&
+            item.kind === "tool" &&
+            item.toolType === "plan" &&
+            item.id === latestPlanToolItemId
+          ) {
+            return false;
+          }
           return true;
         }
         return reasoningMetaById.get(item.id)?.hasBody ?? false;
       }),
-    [items, reasoningMetaById],
+    [items, latestPlanToolItemId, reasoningMetaById],
   );
 
   useEffect(() => {
@@ -245,7 +303,125 @@ export function useMessagesViewState({
     }
   }, [visibleItems]);
 
-  const groupedItems = useMemo(() => buildToolGroups(visibleItems), [visibleItems]);
+  const groupedItems = useMemo(() => {
+    const entries = buildMessageEntries(visibleItems, isThinking, {
+      processingStartedAt,
+      lastDurationMs,
+    });
+    if (activePlan) {
+      entries.push({
+        kind: "plan",
+        plan: activePlan,
+        isActive: isThinking,
+      });
+    }
+    return entries;
+  }, [activePlan, isThinking, lastDurationMs, processingStartedAt, visibleItems]);
+
+  useEffect(() => {
+    const nextActiveWorkGroupIds = new Set<string>();
+
+    const visitEntries = (entries: MessageListEntry[]) => {
+      entries.forEach((entry) => {
+        if (entry.kind !== "workGroup") {
+          return;
+        }
+        if (entry.group.isActive) {
+          nextActiveWorkGroupIds.add(entry.group.id);
+        }
+        visitEntries(entry.group.entries);
+      });
+    };
+
+    visitEntries(groupedItems);
+
+    const previouslyActiveIds = activeWorkGroupIdsRef.current;
+    const completedIds = Array.from(previouslyActiveIds).filter(
+      (id) => !nextActiveWorkGroupIds.has(id),
+    );
+
+    if (completedIds.length > 0) {
+      setExpandedWorkGroups((prev) => {
+        let changed = false;
+        const next = new Set(prev);
+        completedIds.forEach((id) => {
+          if (manuallyToggledWorkGroupsRef.current.has(id)) {
+            return;
+          }
+          if (!next.has(id)) {
+            return;
+          }
+          next.delete(id);
+          changed = true;
+        });
+        return changed ? next : prev;
+      });
+    }
+
+    activeWorkGroupIdsRef.current = nextActiveWorkGroupIds;
+  }, [groupedItems]);
+
+  const groupControls = useMemo(() => {
+    const toolGroupIds: string[] = [];
+    const collapsibleWorkGroupIds: string[] = [];
+
+    const visitEntries = (entries: MessageListEntry[]) => {
+      entries.forEach((entry) => {
+        if (entry.kind === "item") {
+          return;
+        }
+        if (entry.kind === "toolGroup") {
+          toolGroupIds.push(entry.group.id);
+          return;
+        }
+        if (entry.kind === "plan") {
+          return;
+        }
+        if (entry.kind !== "workGroup") {
+          return;
+        }
+        if (!entry.group.isActive) {
+          collapsibleWorkGroupIds.push(entry.group.id);
+        }
+        visitEntries(entry.group.entries);
+      });
+    };
+
+    visitEntries(groupedItems);
+
+    const hasAnyGroups =
+      toolGroupIds.length > 0 || collapsibleWorkGroupIds.length > 0;
+    const canExpandAny =
+      toolGroupIds.some((id) => !collapsedToolGroups.has(id)) ||
+      collapsibleWorkGroupIds.some((id) => !expandedWorkGroups.has(id));
+    const canCollapseAny =
+      toolGroupIds.some((id) => collapsedToolGroups.has(id)) ||
+      collapsibleWorkGroupIds.some((id) => expandedWorkGroups.has(id));
+
+    return {
+      hasAnyGroups,
+      canExpandAny,
+      canCollapseAny,
+      toolGroupIds,
+      collapsibleWorkGroupIds,
+    };
+  }, [collapsedToolGroups, expandedWorkGroups, groupedItems]);
+
+  const expandAllGroups = useCallback(() => {
+    if (!groupControls.hasAnyGroups) {
+      return;
+    }
+    setCollapsedToolGroups(new Set(groupControls.toolGroupIds));
+    setExpandedWorkGroups(new Set(groupControls.collapsibleWorkGroupIds));
+  }, [groupControls]);
+
+  const collapseAllGroups = useCallback(() => {
+    if (!groupControls.hasAnyGroups) {
+      return;
+    }
+    setCollapsedToolGroups(new Set());
+    setExpandedWorkGroups(new Set());
+  }, [groupControls]);
 
   const planFollowup = useMemo(() => {
     if (!onPlanAccept || !onPlanSubmitChanges) {
@@ -295,12 +471,17 @@ export function useMessagesViewState({
     toggleExpanded,
     collapsedToolGroups,
     toggleToolGroup,
+    expandedWorkGroups,
+    toggleWorkGroup,
     copiedMessageId,
     handleCopyMessage,
     handleQuoteMessage,
     reasoningMetaById,
     latestReasoningLabel,
     groupedItems,
+    groupControls,
+    expandAllGroups,
+    collapseAllGroups,
     planFollowup,
     dismissPlanFollowup,
   };

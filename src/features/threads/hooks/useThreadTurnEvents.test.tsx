@@ -37,6 +37,7 @@ const makeOptions = (overrides: SetupOverrides = {}) => {
   const markReviewing = vi.fn();
   const setThreadLoaded = vi.fn();
   const setActiveTurnId = vi.fn();
+  const markTurnSettled = vi.fn();
   const getActiveTurnId = vi.fn(
     (threadId: string) => overrides.activeTurnByThread?.[threadId] ?? null,
   );
@@ -65,6 +66,7 @@ const makeOptions = (overrides: SetupOverrides = {}) => {
       setThreadLoaded,
       setActiveTurnId,
       getActiveTurnId,
+      markTurnSettled,
       pendingInterruptsRef,
       pushThreadErrorMessage,
       safeMessageActivity,
@@ -81,6 +83,7 @@ const makeOptions = (overrides: SetupOverrides = {}) => {
     markReviewing,
     setThreadLoaded,
     setActiveTurnId,
+    markTurnSettled,
     getActiveTurnId,
     getCurrentRateLimits,
     pushThreadErrorMessage,
@@ -439,14 +442,20 @@ describe("useThreadTurnEvents", () => {
   });
 
   it("clears pending interrupt and active turn on turn completed", () => {
-    const { result, markProcessing, setActiveTurnId, pendingInterruptsRef } =
-      makeOptions({ pendingInterrupts: ["thread-1"] });
+    const {
+      result,
+      markProcessing,
+      setActiveTurnId,
+      markTurnSettled,
+      pendingInterruptsRef,
+    } = makeOptions({ pendingInterrupts: ["thread-1"] });
 
     act(() => {
       result.current.onTurnCompleted("ws-1", "thread-1", "turn-1");
     });
 
     expect(markProcessing).toHaveBeenCalledWith("thread-1", false);
+    expect(markTurnSettled).toHaveBeenCalledWith("thread-1", "turn-1");
     expect(setActiveTurnId).toHaveBeenCalledWith("thread-1", null);
     expect(pendingInterruptsRef.current.has("thread-1")).toBe(false);
   });

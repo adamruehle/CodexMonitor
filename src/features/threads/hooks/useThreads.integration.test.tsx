@@ -16,7 +16,11 @@ import {
   startReview,
   steerTurn,
 } from "@services/tauri";
-import { STORAGE_KEY_DETACHED_REVIEW_LINKS } from "@threads/utils/threadStorage";
+import {
+  STORAGE_KEY_CUSTOM_NAMES,
+  STORAGE_KEY_DETACHED_REVIEW_LINKS,
+  STORAGE_KEY_THREAD_ITEMS,
+} from "@threads/utils/threadStorage";
 import { useQueuedSend } from "./useQueuedSend";
 import { useThreads } from "./useThreads";
 
@@ -135,6 +139,192 @@ describe("useThreads UX integration", () => {
     if (assistantMerged?.kind === "message") {
       expect(assistantMerged.text).toBe("Hello world");
     }
+  });
+
+  it("restores persisted tool items and merges them with sparse resume payloads", async () => {
+    localStorage.setItem(
+      STORAGE_KEY_THREAD_ITEMS,
+      JSON.stringify({
+        "thread-persisted": [
+          {
+            id: "tool-live-1",
+            kind: "tool",
+            toolType: "mcpToolCall",
+            title: "Tool: jira / get_issue",
+            detail: "{\"key\":\"CMP-1\"}",
+            status: "completed",
+            output: "done",
+          },
+        ],
+      }),
+    );
+
+    vi.mocked(resumeThread).mockResolvedValue({
+      result: {
+        thread: {
+          id: "thread-persisted",
+          preview: "Remote preview",
+          updated_at: 9999,
+          turns: [
+            {
+              id: "turn-1",
+              status: "completed",
+              items: [
+                {
+                  type: "agentMessage",
+                  id: "assistant-remote-1",
+                  text: "Remote response",
+                },
+              ],
+            },
+          ],
+        },
+      },
+    });
+
+    const { result } = renderHook(() =>
+      useThreads({
+        activeWorkspace: workspace,
+        onWorkspaceConnected: vi.fn(),
+      }),
+    );
+
+    act(() => {
+      result.current.setActiveThreadId("thread-persisted");
+    });
+
+    await waitFor(() => {
+      expect(vi.mocked(resumeThread)).toHaveBeenCalledWith("ws-1", "thread-persisted");
+    });
+
+    await waitFor(() => {
+      expect(result.current.activeItems).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: "tool-live-1",
+            kind: "tool",
+            toolType: "mcpToolCall",
+          }),
+          expect.objectContaining({
+            id: "assistant-remote-1",
+            kind: "message",
+            role: "assistant",
+            text: "Remote response",
+          }),
+        ]),
+      );
+    });
+  });
+
+  it("retries hydrating a stale selected thread after the workspace reconnects", async () => {
+    localStorage.setItem(
+      STORAGE_KEY_THREAD_ITEMS,
+      JSON.stringify({
+        "thread-persisted": [
+          {
+            id: "tool-stale-1",
+            kind: "tool",
+            toolType: "commandExecution",
+            title: "Command: npm run tauri:build",
+            detail: "/tmp/codex",
+            status: "inProgress",
+            output: "stale cached output",
+          },
+        ],
+      }),
+    );
+
+    vi.mocked(resumeThread)
+      .mockRejectedValueOnce(new Error("workspace not connected"))
+      .mockResolvedValueOnce({
+        result: {
+          thread: {
+            id: "thread-persisted",
+            preview: "Remote preview",
+            updated_at: 9999,
+            turns: [
+              {
+                id: "turn-1",
+                status: "completed",
+                items: [
+                  {
+                    type: "agentMessage",
+                    id: "assistant-remote-2",
+                    text: "Fresh remote response",
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      });
+
+    const { result, rerender } = renderHook(
+      ({ activeWorkspace }) =>
+        useThreads({
+          activeWorkspace,
+          onWorkspaceConnected: vi.fn(),
+        }),
+      {
+        initialProps: {
+          activeWorkspace: { ...workspace, connected: false },
+        },
+      },
+    );
+
+    act(() => {
+      result.current.setActiveThreadId("thread-persisted");
+    });
+
+    await waitFor(() => {
+      expect(vi.mocked(resumeThread)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(resumeThread)).toHaveBeenNthCalledWith(
+        1,
+        "ws-1",
+        "thread-persisted",
+      );
+    });
+
+    expect(result.current.activeItems).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "tool-stale-1",
+          kind: "tool",
+          toolType: "commandExecution",
+        }),
+      ]),
+    );
+
+    rerender({
+      activeWorkspace: { ...workspace, connected: true },
+    });
+
+    await waitFor(() => {
+      expect(vi.mocked(resumeThread)).toHaveBeenCalledTimes(2);
+      expect(vi.mocked(resumeThread)).toHaveBeenNthCalledWith(
+        2,
+        "ws-1",
+        "thread-persisted",
+      );
+    });
+
+    await waitFor(() => {
+      expect(result.current.activeItems).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: "tool-stale-1",
+            kind: "tool",
+            toolType: "commandExecution",
+          }),
+          expect.objectContaining({
+            id: "assistant-remote-2",
+            kind: "message",
+            role: "assistant",
+            text: "Fresh remote response",
+          }),
+        ]),
+      );
+    });
   });
 
   it("applies runtime codex args before start and selection resume", async () => {
@@ -542,7 +732,7 @@ describe("useThreads UX integration", () => {
     );
   });
 
-  it("does not resume selected threads that already have local items", async () => {
+  it("resumes selected threads with local items so the snapshot can be validated", async () => {
     vi.mocked(resumeThread).mockResolvedValue({
       result: {
         thread: {
@@ -593,11 +783,10 @@ describe("useThreads UX integration", () => {
       result.current.setActiveThreadId("thread-3");
     });
 
-    await act(async () => {
-      await Promise.resolve();
+    await waitFor(() => {
+      expect(ensureWorkspaceRuntimeCodexArgs).toHaveBeenCalledWith("ws-1", "thread-3");
+      expect(vi.mocked(resumeThread)).toHaveBeenCalledWith("ws-1", "thread-3");
     });
-    expect(vi.mocked(resumeThread)).not.toHaveBeenCalled();
-    expect(ensureWorkspaceRuntimeCodexArgs).not.toHaveBeenCalled();
 
     const activeItems = result.current.activeItems;
     const hasLocal = activeItems.some(
@@ -610,7 +799,63 @@ describe("useThreads UX integration", () => {
       (item) => item.kind === "message" && item.id === "server-user-1",
     );
     expect(hasLocal).toBe(true);
-    expect(hasRemote).toBe(false);
+    expect(hasRemote).toBe(true);
+  });
+
+  it("revalidates selected local snapshots after backend reconnect", async () => {
+    vi.mocked(resumeThread).mockResolvedValue({
+      result: {
+        thread: {
+          id: "thread-3",
+          preview: "Remote preview",
+          updated_at: 9999,
+          turns: [],
+        },
+      },
+    });
+    const ensureWorkspaceRuntimeCodexArgs = vi.fn(async () => undefined);
+
+    const { result } = renderHook(() =>
+      useThreads({
+        activeWorkspace: workspace,
+        onWorkspaceConnected: vi.fn(),
+        ensureWorkspaceRuntimeCodexArgs,
+      }),
+    );
+
+    act(() => {
+      handlers?.onAgentMessageCompleted?.({
+        workspaceId: "ws-1",
+        threadId: "thread-3",
+        itemId: "local-assistant-1",
+        text: "Local response",
+      });
+    });
+
+    act(() => {
+      result.current.setActiveThreadId("thread-3");
+    });
+
+    await waitFor(() => {
+      expect(ensureWorkspaceRuntimeCodexArgs).toHaveBeenCalledWith("ws-1", "thread-3");
+      expect(vi.mocked(resumeThread)).toHaveBeenCalledWith("ws-1", "thread-3");
+    });
+
+    vi.mocked(resumeThread).mockClear();
+    ensureWorkspaceRuntimeCodexArgs.mockClear();
+
+    act(() => {
+      handlers?.onWorkspaceConnected?.("ws-1");
+    });
+
+    act(() => {
+      result.current.setActiveThreadId("thread-3");
+    });
+
+    await waitFor(() => {
+      expect(ensureWorkspaceRuntimeCodexArgs).toHaveBeenCalledWith("ws-1", "thread-3");
+      expect(vi.mocked(resumeThread)).toHaveBeenCalledWith("ws-1", "thread-3");
+    });
   });
 
   it("clears empty plan updates to null", () => {
@@ -1952,6 +2197,49 @@ describe("useThreads UX integration", () => {
       "thread-a",
     ]);
     expect(unpinnedRows.map((row) => row.thread.id)).toEqual(["thread-b"]);
+  });
+
+  it("refreshes visible thread names when custom-name storage changes", async () => {
+    vi.mocked(listThreads).mockResolvedValue({
+      result: {
+        data: [
+          {
+            id: "thread-b",
+            preview: "Beta",
+            updated_at: 3000,
+            cwd: workspace.path,
+          },
+        ],
+        nextCursor: null,
+      },
+    });
+
+    const { result } = renderHook(() =>
+      useThreads({
+        activeWorkspace: workspace,
+        onWorkspaceConnected: vi.fn(),
+      }),
+    );
+
+    await act(async () => {
+      await result.current.listThreadsForWorkspace(workspace);
+    });
+
+    expect(result.current.threadsByWorkspace["ws-1"]?.[0]?.name).toBe("Beta");
+
+    act(() => {
+      localStorage.setItem(
+        STORAGE_KEY_CUSTOM_NAMES,
+        JSON.stringify({ "ws-1:thread-b": "Stored Beta" }),
+      );
+      window.dispatchEvent(
+        new StorageEvent("storage", { key: STORAGE_KEY_CUSTOM_NAMES }),
+      );
+    });
+
+    await waitFor(() => {
+      expect(result.current.threadsByWorkspace["ws-1"]?.[0]?.name).toBe("Stored Beta");
+    });
   });
 
   it("keeps parent rows anchored when refresh only returns subagent children", async () => {

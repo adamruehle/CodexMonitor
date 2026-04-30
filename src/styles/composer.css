@@ -684,8 +684,24 @@
   flex-wrap: wrap;
 }
 
-.composer-context {
+.composer-context-cluster {
   margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.composer-group-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.composer-group-control {
+  white-space: nowrap;
+}
+
+.composer-context {
   display: grid;
   grid-template-columns: auto;
   align-items: center;
@@ -999,6 +1015,14 @@
   }
 
   .app.layout-phone .composer-context {
+    display: none;
+  }
+
+  .app.layout-phone .composer-context-cluster {
+    margin-left: auto;
+  }
+
+  .app.layout-phone .composer-group-controls {
     display: none;
   }
 

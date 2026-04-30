@@ -11,6 +11,8 @@ import {
   isReviewingFromThread,
   mergeThreadItems,
   previewThreadName,
+  repairMissingTimestamps,
+  repairMissingTurnIds,
 } from "@utils/threadItems";
 import { asString, normalizeRootPath } from "./threadNormalize";
 import { getResumedTurnState } from "./threadRpc";
@@ -122,7 +124,6 @@ export function buildResumeHydrationPlan({
   localActiveTurnId,
   localItems,
   localStatus,
-  replaceLocal,
   thread,
   threadId,
   workspaceId,
@@ -131,27 +132,14 @@ export function buildResumeHydrationPlan({
   localActiveTurnId: string | null;
   localItems: ConversationItem[];
   localStatus: { isProcessing?: boolean } | undefined;
-  replaceLocal: boolean;
   thread: ThreadRecord;
   threadId: string;
   workspaceId: string;
 }): ResumeHydrationPlan {
   const items = buildItemsFromThread(thread);
-  if (localItems.length > 0 && !replaceLocal) {
-    return {
-      keepLocalProcessing: false,
-      lastMessageText: null,
-      lastMessageTimestamp: null,
-      mergedItems: localItems,
-      processingTimestamp: Date.now(),
-      resumedActiveTurnId: null,
-      shouldHydrate: false,
-      shouldMarkProcessing: false,
-      threadName: null,
-      reviewing: false,
-    };
-  }
-
+  const repairedLocalItems = repairMissingTimestamps(
+    repairMissingTurnIds(localItems),
+  );
   const resumedTurnState = getResumedTurnState(thread);
   const keepLocalProcessing =
     (localStatus?.isProcessing ?? false) &&
@@ -162,22 +150,18 @@ export function buildResumeHydrationPlan({
     : resumedTurnState.activeTurnId;
   const shouldMarkProcessing = keepLocalProcessing || Boolean(resumedActiveTurnId);
   const processingTimestamp = resumedTurnState.activeTurnStartedAtMs ?? Date.now();
-  const hasOverlap =
-    items.length > 0 &&
-    localItems.length > 0 &&
-    items.some((item) => localItems.some((local) => local.id === item.id));
   const mergedItems =
     items.length > 0
-      ? replaceLocal
-        ? items
-        : localItems.length > 0 && !hasOverlap
-          ? localItems
-          : mergeThreadItems(items, localItems)
-      : localItems;
+      ? repairedLocalItems.length > 0
+        ? mergeThreadItems(items, repairedLocalItems)
+        : items
+      : repairedLocalItems;
   const preview = asString(thread.preview ?? "");
+  const title = asString(thread.title ?? thread.threadName ?? thread.thread_name).trim();
   const customName = getCustomName(workspaceId, threadId);
-  const threadName =
-    !customName && preview ? previewThreadName(preview, "New Agent") : null;
+  const threadName = !customName
+    ? title || (preview ? previewThreadName(preview, "New Agent") : null)
+    : null;
   const lastAgentMessage = [...mergedItems]
     .reverse()
     .find(

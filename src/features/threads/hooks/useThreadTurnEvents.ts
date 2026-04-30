@@ -34,6 +34,7 @@ type UseThreadTurnEventsOptions = {
   markReviewing: (threadId: string, isReviewing: boolean) => void;
   setActiveTurnId: (threadId: string, turnId: string | null) => void;
   getActiveTurnId: (threadId: string) => string | null;
+  markTurnSettled?: (threadId: string, turnId: string | null) => void;
   pendingInterruptsRef: MutableRefObject<Set<string>>;
   pushThreadErrorMessage: (threadId: string, message: string) => void;
   safeMessageActivity: () => void;
@@ -51,6 +52,7 @@ export function useThreadTurnEvents({
   markReviewing,
   setActiveTurnId,
   getActiveTurnId,
+  markTurnSettled,
   pendingInterruptsRef,
   pushThreadErrorMessage,
   safeMessageActivity,
@@ -149,8 +151,11 @@ export function useThreadTurnEvents({
 
       const customName = getCustomName(workspaceId, threadId);
       if (!customName) {
+        const title = asString(
+          thread.title ?? thread.threadName ?? thread.thread_name,
+        ).trim();
         const preview = asString(thread.preview).trim();
-        const name = clampThreadName(preview);
+        const name = title || clampThreadName(preview);
         if (name) {
           dispatch({ type: "setThreadName", workspaceId, threadId, name });
         }
@@ -266,6 +271,7 @@ export function useThreadTurnEvents({
       if (turnId && activeTurnId && turnId !== activeTurnId) {
         return;
       }
+      markTurnSettled?.(threadId, turnId || activeTurnId);
       markProcessing(threadId, false);
       resetThreadTurnState(
         {
@@ -283,6 +289,7 @@ export function useThreadTurnEvents({
     [
       dispatch,
       getLatestKnownActiveTurnId,
+      markTurnSettled,
       markProcessing,
       pendingInterruptsRef,
       setActiveTurnId,
@@ -305,6 +312,8 @@ export function useThreadTurnEvents({
         statusType === "notloaded" ||
         statusType === "systemerror"
       ) {
+        const activeTurnId = getLatestKnownActiveTurnId(threadId);
+        markTurnSettled?.(threadId, activeTurnId);
         markProcessing(threadId, false);
         if (statusType === "notloaded") {
           setThreadLoaded(threadId, false);
@@ -324,6 +333,8 @@ export function useThreadTurnEvents({
     [
       markProcessing,
       markReviewing,
+      getLatestKnownActiveTurnId,
+      markTurnSettled,
       pendingInterruptsRef,
       setActiveTurnId,
       setThreadLoaded,
@@ -422,6 +433,7 @@ export function useThreadTurnEvents({
       if (turnId && activeTurnId && turnId !== activeTurnId) {
         return;
       }
+      markTurnSettled?.(threadId, turnId || activeTurnId);
       dispatch({ type: "ensureThread", workspaceId, threadId });
       markProcessing(threadId, false);
       markReviewing(threadId, false);
@@ -443,6 +455,7 @@ export function useThreadTurnEvents({
     [
       dispatch,
       getLatestKnownActiveTurnId,
+      markTurnSettled,
       markProcessing,
       markReviewing,
       pushThreadErrorMessage,

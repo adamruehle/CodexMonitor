@@ -17,24 +17,44 @@ function getDragPosition(position: { x: number; y: number }) {
   return position;
 }
 
-function normalizeDragPosition(
+function buildDragPositionCandidates(
   position: { x: number; y: number },
   lastClientPosition: { x: number; y: number } | null,
 ) {
   const scale = window.devicePixelRatio || 1;
-  if (scale === 1 || !lastClientPosition) {
-    return getDragPosition(position);
+  const candidates: Array<{ x: number; y: number }> = [getDragPosition(position)];
+  if (scale !== 1) {
+    candidates.push({ x: position.x / scale, y: position.y / scale });
   }
-  const logicalDistance = Math.hypot(
-    position.x - lastClientPosition.x,
-    position.y - lastClientPosition.y,
+  if (scale !== 1 && lastClientPosition) {
+    const logicalDistance = Math.hypot(
+      position.x - lastClientPosition.x,
+      position.y - lastClientPosition.y,
+    );
+    const scaled = { x: position.x / scale, y: position.y / scale };
+    const scaledDistance = Math.hypot(
+      scaled.x - lastClientPosition.x,
+      scaled.y - lastClientPosition.y,
+    );
+    if (scaledDistance < logicalDistance) {
+      candidates.unshift(scaled);
+    }
+  }
+  return candidates.filter(
+    (candidate, index, list) =>
+      list.findIndex(
+        (entry) => entry.x === candidate.x && entry.y === candidate.y,
+      ) === index,
   );
-  const scaled = { x: position.x / scale, y: position.y / scale };
-  const scaledDistance = Math.hypot(
-    scaled.x - lastClientPosition.x,
-    scaled.y - lastClientPosition.y,
+}
+
+function isPositionInsideRect(position: { x: number; y: number }, rect: DOMRect) {
+  return (
+    position.x >= rect.left &&
+    position.x <= rect.right &&
+    position.y >= rect.top &&
+    position.y <= rect.bottom
   );
-  return scaledDistance < logicalDistance ? scaled : position;
 }
 
 type DropPathsHandler = (paths: string[]) => void | Promise<void>;
@@ -100,31 +120,21 @@ export function useWorkspaceDropZone({
         return;
       }
       if (payload.type === "over" || payload.type === "enter") {
-        const position = normalizeDragPosition(
+        const rect = dropTargetRef.current.getBoundingClientRect();
+        const isInside = buildDragPositionCandidates(
           payload.position,
           lastClientPositionRef.current,
-        );
-        const rect = dropTargetRef.current.getBoundingClientRect();
-        const isInside =
-          position.x >= rect.left &&
-          position.x <= rect.right &&
-          position.y >= rect.top &&
-          position.y <= rect.bottom;
+        ).some((candidate) => isPositionInsideRect(candidate, rect));
         setIsDragOver(isInside);
         return;
       }
       if (payload.type === "drop") {
         setIsDragOver(false);
-        const position = normalizeDragPosition(
+        const rect = dropTargetRef.current.getBoundingClientRect();
+        const isInside = buildDragPositionCandidates(
           payload.position,
           lastClientPositionRef.current,
-        );
-        const rect = dropTargetRef.current.getBoundingClientRect();
-        const isInside =
-          position.x >= rect.left &&
-          position.x <= rect.right &&
-          position.y >= rect.top &&
-          position.y <= rect.bottom;
+        ).some((candidate) => isPositionInsideRect(candidate, rect));
         if (!isInside) {
           return;
         }

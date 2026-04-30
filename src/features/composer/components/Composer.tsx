@@ -44,6 +44,7 @@ import { ComposerMetaBar } from "./ComposerMetaBar";
 import { ComposerQueue } from "./ComposerQueue";
 import { isMacPlatform } from "../../../utils/platformPaths";
 import type { CodexArgsOption } from "../../threads/utils/codexArgsProfiles";
+import type { MessageGroupControlsApi } from "../../messages/components/messageGroupControls";
 
 type ComposerProps = {
   onSend: (
@@ -146,6 +147,7 @@ type ComposerProps = {
     disabled?: boolean;
     onSelect: () => void | Promise<void>;
   }[];
+  messageGroupControls?: MessageGroupControlsApi | null;
 };
 
 const DEFAULT_EDITOR_SETTINGS: ComposerEditorSettings = {
@@ -243,6 +245,7 @@ export const Composer = memo(function Composer({
   onReviewPromptConfirmCustom,
   onFileAutocompleteActiveChange,
   contextActions = [],
+  messageGroupControls = null,
 }: ComposerProps) {
   const [text, setText] = useState(draftText);
   const [selectionStart, setSelectionStart] = useState<number | null>(null);
@@ -693,6 +696,7 @@ export const Composer = memo(function Composer({
         accessMode={accessMode}
         onSelectAccessMode={onSelectAccessMode}
         contextUsage={contextUsage}
+        messageGroupControls={messageGroupControls}
       />
     </footer>
   );
