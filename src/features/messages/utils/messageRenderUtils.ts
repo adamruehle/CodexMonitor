@@ -1,5 +1,5 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
-import type { ConversationItem } from "../../../types";
+import type { ConversationItem, TurnPlan } from "../../../types";
 
 export type ToolSummary = {
   label: string;
@@ -34,9 +34,27 @@ export type ToolGroup = {
   messageCount: number;
 };
 
+export type WorkGroup = {
+  id: string;
+  items: ConversationItem[];
+  entries: MessageListEntry[];
+  title: string;
+  preview: string | null;
+  durationMs: number | null;
+  isActive: boolean;
+};
+
 export type MessageListEntry =
   | { kind: "item"; item: ConversationItem }
-  | { kind: "toolGroup"; group: ToolGroup };
+  | { kind: "toolGroup"; group: ToolGroup }
+  | { kind: "workGroup"; group: WorkGroup }
+  | { kind: "plan"; plan: TurnPlan; isActive: boolean };
+
+type MessageEntryTimingOptions = {
+  processingStartedAt?: number | null;
+  lastDurationMs?: number | null;
+  nowMs?: number;
+};
 
 export const SCROLL_THRESHOLD_PX = 120;
 export const MAX_COMMAND_OUTPUT_LINES = 200;
@@ -320,15 +338,415 @@ export function buildToolGroups(items: ConversationItem[]): MessageListEntry[] {
   return entries;
 }
 
+function isAssistantMessage(
+  item: ConversationItem,
+): item is Extract<ConversationItem, { kind: "message" }> & { role: "assistant" } {
+  return item.kind === "message" && item.role === "assistant";
+}
+
+function isFinalAssistantMessage(
+  item: ConversationItem,
+): item is Extract<ConversationItem, { kind: "message" }> & { role: "assistant" } {
+  return (
+    isAssistantMessage(item) &&
+    typeof item.phase === "string" &&
+    item.phase.trim().toLowerCase() === "final_answer"
+  );
+}
+
+function isUserMessage(
+  item: ConversationItem,
+): item is Extract<ConversationItem, { kind: "message" }> & { role: "user" } {
+  return item.kind === "message" && item.role === "user";
+}
+
+function isBookkeepingReasoning(
+  item: ConversationItem,
+): item is Extract<ConversationItem, { kind: "reasoning" }> {
+  return (
+    item.kind === "reasoning" &&
+    !item.summary.trim() &&
+    !item.content.trim()
+  );
+}
+
+function isContextCompactionTool(
+  item: ConversationItem,
+): item is Extract<ConversationItem, { kind: "tool" }> {
+  return (
+    item.kind === "tool" &&
+    item.title.trim().toLowerCase() === "context compaction"
+  );
+}
+
+function isTrailingBookkeepingItem(item: ConversationItem) {
+  return isBookkeepingReasoning(item) || isContextCompactionTool(item);
+}
+
+function normalizedTurnId(item: ConversationItem) {
+  return typeof item.turnId === "string" && item.turnId.trim().length > 0
+    ? item.turnId.trim()
+    : null;
+}
+
+function formatWorkedDuration(durationMs: number) {
+  const durationSeconds = Math.max(1, Math.floor(durationMs / 1000));
+  const hours = Math.floor(durationSeconds / 3600);
+  const minutes = Math.floor((durationSeconds % 3600) / 60);
+  const seconds = durationSeconds % 60;
+  const parts: string[] = [];
+  if (hours > 0) {
+    parts.push(`${hours}h`);
+  }
+  if (minutes > 0) {
+    parts.push(`${minutes}m`);
+  }
+  if (seconds > 0 || parts.length === 0) {
+    parts.push(`${seconds}s`);
+  }
+  return parts.join(" ");
+}
+
+function itemTimestamp(item: ConversationItem) {
+  return typeof item.timestampMs === "number" && Number.isFinite(item.timestampMs)
+    ? item.timestampMs
+    : null;
+}
+
+function workItemPreview(item: ToolGroupItem): string | null {
+  if (item.kind === "tool") {
+    const summary = buildToolSummary(item, item.title);
+    const label = summary.label?.trim();
+    const value = summary.value?.trim() || item.title.trim();
+    if (!label && !value) {
+      return null;
+    }
+    const verb = label ? label.charAt(0).toUpperCase() + label.slice(1) : "Used";
+    return [verb, value].filter(Boolean).join(" ");
+  }
+  if (item.kind === "explore") {
+    const lastEntry = item.entries[item.entries.length - 1];
+    if (!lastEntry) {
+      return item.status === "exploring" ? "Exploring" : "Explored";
+    }
+    return `${item.status === "exploring" ? "Exploring" : "Explored"} ${lastEntry.label}`;
+  }
+  if (item.kind === "reasoning") {
+    const parsed = parseReasoning(item);
+    return parsed.workingLabel ? `Reasoned about ${parsed.workingLabel}` : "Reasoned";
+  }
+  if (item.kind === "userInput") {
+    return "Answered input request";
+  }
+  return null;
+}
+
+function shouldWrapWorkGroup(items: ConversationItem[]) {
+  const workItems = items.filter(isToolGroupItem);
+  if (workItems.length === 0) {
+    return false;
+  }
+  if (items.length > 1) {
+    return true;
+  }
+  const [first] = workItems;
+  return first ? first.kind !== "explore" : false;
+}
+
+function shouldWrapCompletedTrailingWorkGroup(items: ConversationItem[]) {
+  if (!shouldWrapWorkGroup(items)) {
+    return false;
+  }
+  return items.some((item) => isAssistantMessage(item) || isUserMessage(item));
+}
+
+function buildWorkGroup(
+  items: ConversationItem[],
+  isActive: boolean,
+  durationItems: ConversationItem[] = items,
+  durationOverrideMs: number | null = null,
+): WorkGroup {
+  const startTimestamp =
+    durationItems.find((item) => itemTimestamp(item) !== null)?.timestampMs ?? null;
+  const endTimestamp =
+    [...durationItems].reverse().find((item) => itemTimestamp(item) !== null)?.timestampMs ??
+      null;
+  const durationFromItems =
+    startTimestamp !== null && endTimestamp !== null && endTimestamp >= startTimestamp
+      ? endTimestamp - startTimestamp
+      : null;
+  const longestToolDuration = items.reduce((maxDuration, item) => {
+    if (item.kind !== "tool") {
+      return maxDuration;
+    }
+    if (typeof item.durationMs !== "number" || !Number.isFinite(item.durationMs)) {
+      return maxDuration;
+    }
+    return Math.max(maxDuration, item.durationMs);
+  }, 0);
+  const durationMs =
+    typeof durationOverrideMs === "number" && Number.isFinite(durationOverrideMs)
+      ? Math.max(0, durationOverrideMs)
+      : durationFromItems && durationFromItems > 0
+      ? durationFromItems
+      : longestToolDuration > 0
+        ? longestToolDuration
+        : null;
+  const preview = Array.from(
+    new Set(
+      items
+        .filter(isToolGroupItem)
+        .map(workItemPreview)
+        .filter((entry): entry is string => Boolean(entry?.trim())),
+    ),
+  )
+    .slice(0, 3)
+    .join(" • ");
+
+  return {
+    id: items[0]?.id ?? `work-${Date.now()}`,
+    items,
+    entries: buildToolGroups(items),
+    title:
+      !isActive && durationMs ? `Worked for ${formatWorkedDuration(durationMs)}` : "Worked",
+    preview: preview || null,
+    durationMs,
+    isActive,
+  };
+}
+
+function pushPlainWorkItems(entries: MessageListEntry[], items: ConversationItem[]) {
+  buildToolGroups(items).forEach((entry) => entries.push(entry));
+}
+
+function buildLegacyMessageEntries(items: ConversationItem[], isThinking: boolean) {
+  const entries: MessageListEntry[] = [];
+  let workBuffer: ConversationItem[] = [];
+
+  const bufferHasToolLikeWork = () => workBuffer.some(isToolGroupItem);
+
+  const hasUpcomingToolLikeWork = (startIndex: number) => {
+    for (let index = startIndex + 1; index < items.length; index += 1) {
+      const next = items[index];
+      if (isToolGroupItem(next)) {
+        return true;
+      }
+      if (isUserMessage(next)) {
+        return false;
+      }
+    }
+    return false;
+  };
+
+  const flushPlain = () => {
+    if (workBuffer.length === 0) {
+      return;
+    }
+    pushPlainWorkItems(entries, workBuffer);
+    workBuffer = [];
+  };
+
+  const flushWorkGroup = (active: boolean) => {
+    if (workBuffer.length === 0) {
+      return;
+    }
+    if (shouldWrapWorkGroup(workBuffer)) {
+      entries.push({
+        kind: "workGroup",
+        group: buildWorkGroup(workBuffer, active),
+      });
+    } else {
+      pushPlainWorkItems(entries, workBuffer);
+    }
+    workBuffer = [];
+  };
+
+  items.forEach((item, index) => {
+    if (isToolGroupItem(item)) {
+      workBuffer.push(item);
+      return;
+    }
+    if (isAssistantMessage(item)) {
+      if (isFinalAssistantMessage(item)) {
+        flushWorkGroup(false);
+        entries.push({ kind: "item", item });
+        return;
+      }
+      if (workBuffer.length > 0) {
+        if (bufferHasToolLikeWork()) {
+          flushWorkGroup(false);
+          entries.push({ kind: "item", item });
+          return;
+        }
+        workBuffer.push(item);
+        return;
+      }
+      if (hasUpcomingToolLikeWork(index)) {
+        workBuffer.push(item);
+        return;
+      }
+      flushPlain();
+      entries.push({ kind: "item", item });
+      return;
+    }
+    flushPlain();
+    entries.push({ kind: "item", item });
+  });
+
+  if (workBuffer.length > 0) {
+    if (isThinking || shouldWrapCompletedTrailingWorkGroup(workBuffer)) {
+      flushWorkGroup(isThinking);
+    } else {
+      flushPlain();
+    }
+  }
+
+  return entries;
+}
+
+function buildTurnEntries(
+  items: ConversationItem[],
+  isActive: boolean,
+  timing: MessageEntryTimingOptions = {},
+) {
+  const entries: MessageListEntry[] = [];
+  let index = 0;
+
+  if (index < items.length && isUserMessage(items[index])) {
+    entries.push({ kind: "item", item: items[index] });
+    index += 1;
+  }
+
+  const turnResponseItems = items.slice(index);
+  if (turnResponseItems.length === 0) {
+    return entries;
+  }
+
+  const activeDurationOverride =
+    isActive && typeof timing.processingStartedAt === "number"
+      ? Math.max(0, (timing.nowMs ?? Date.now()) - timing.processingStartedAt)
+      : null;
+  const completedDurationOverride =
+    !isActive && typeof timing.lastDurationMs === "number"
+      ? Math.max(0, timing.lastDurationMs)
+      : null;
+
+  if (isActive) {
+    entries.push({
+      kind: "workGroup",
+      group: buildWorkGroup(turnResponseItems, true, items, activeDurationOverride),
+    });
+    return entries;
+  }
+
+  let finalAssistantIndex = -1;
+  for (let cursor = turnResponseItems.length - 1; cursor >= 0; cursor -= 1) {
+    if (isFinalAssistantMessage(turnResponseItems[cursor])) {
+      finalAssistantIndex = cursor;
+      break;
+    }
+  }
+  for (let cursor = turnResponseItems.length - 1; cursor >= 0; cursor -= 1) {
+    if (finalAssistantIndex >= 0) {
+      break;
+    }
+    const trailingItems = turnResponseItems.slice(cursor + 1);
+    if (
+      isAssistantMessage(turnResponseItems[cursor]) &&
+      trailingItems.every(isTrailingBookkeepingItem)
+    ) {
+      finalAssistantIndex = cursor;
+      break;
+    }
+  }
+
+  if (finalAssistantIndex < 0) {
+    if (shouldWrapCompletedTrailingWorkGroup(turnResponseItems)) {
+      entries.push({
+        kind: "workGroup",
+        group: buildWorkGroup(
+          turnResponseItems,
+          false,
+          items,
+          completedDurationOverride,
+        ),
+      });
+    } else {
+      entries.push(...buildToolGroups(turnResponseItems));
+    }
+    return entries;
+  }
+
+  const workItems = [
+    ...turnResponseItems.slice(0, finalAssistantIndex),
+    ...turnResponseItems.slice(finalAssistantIndex + 1),
+  ];
+  const finalAssistant = turnResponseItems[finalAssistantIndex];
+
+  if (workItems.length > 0) {
+    entries.push({
+      kind: "workGroup",
+      group: buildWorkGroup(workItems, false, items, completedDurationOverride),
+    });
+  }
+
+  entries.push({ kind: "item", item: finalAssistant });
+
+  return entries;
+}
+
+export function buildMessageEntries(
+  items: ConversationItem[],
+  isThinking: boolean,
+  timing: MessageEntryTimingOptions = {},
+): MessageListEntry[] {
+  const entries: MessageListEntry[] = [];
+  let index = 0;
+
+  while (index < items.length) {
+    const turnId = normalizedTurnId(items[index]);
+    let end = index + 1;
+    if (turnId) {
+      while (end < items.length && normalizedTurnId(items[end]) === turnId) {
+        end += 1;
+      }
+      const segment = items.slice(index, end);
+      entries.push(
+        ...buildTurnEntries(
+          segment,
+          isThinking && end === items.length,
+          end === items.length
+            ? timing
+            : {
+                processingStartedAt: null,
+                lastDurationMs: null,
+                nowMs: timing.nowMs,
+              },
+        ),
+      );
+    } else {
+      while (end < items.length && !normalizedTurnId(items[end])) {
+        end += 1;
+      }
+      const segment = items.slice(index, end);
+      entries.push(...buildLegacyMessageEntries(segment, isThinking && end === items.length));
+    }
+    index = end;
+  }
+
+  return entries;
+}
+
 export function cleanCommandText(commandText: string) {
   if (!commandText) {
     return "";
   }
   const trimmed = commandText.trim();
+  const withoutLabel = trimmed.replace(/^Command:\s*/i, "");
   const shellMatch = trimmed.match(
     /^(?:\/\S+\/)?(?:bash|zsh|sh|fish)(?:\.exe)?\s+-lc\s+(['"])([\s\S]+)\1$/,
   );
-  const inner = shellMatch ? shellMatch[2] : trimmed;
+  const inner = shellMatch ? shellMatch[2] : withoutLabel;
   const cdMatch = inner.match(
     /^\s*cd\s+[^&;]+(?:\s*&&\s*|\s*;\s*)([\s\S]+)$/i,
   );

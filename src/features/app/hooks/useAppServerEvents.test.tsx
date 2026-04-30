@@ -81,7 +81,12 @@ describe("useAppServerEvents", () => {
         workspace_id: "ws-1",
         message: {
           method: "item/agentMessage/delta",
-          params: { threadId: "thread-1", itemId: "item-1", delta: "Hello" },
+          params: {
+            threadId: "thread-1",
+            itemId: "item-1",
+            delta: "Hello",
+            phase: "commentary",
+          },
         },
       });
     });
@@ -90,6 +95,7 @@ describe("useAppServerEvents", () => {
       threadId: "thread-1",
       itemId: "item-1",
       delta: "Hello",
+      phase: "commentary",
     });
 
     act(() => {
@@ -324,7 +330,14 @@ describe("useAppServerEvents", () => {
           method: "item/completed",
           params: {
             threadId: "thread-1",
-            item: { type: "agentMessage", id: "item-2", text: "Done" },
+            turnId: "turn-1",
+            timestampMs: 1_700_000_000_000,
+            item: {
+              type: "agentMessage",
+              id: "item-2",
+              text: "Done",
+              phase: "final_answer",
+            },
           },
         },
       });
@@ -333,12 +346,18 @@ describe("useAppServerEvents", () => {
       type: "agentMessage",
       id: "item-2",
       text: "Done",
+      phase: "final_answer",
+      turnId: "turn-1",
+      timestampMs: 1_700_000_000_000,
     });
     expect(handlers.onAgentMessageCompleted).toHaveBeenCalledWith({
       workspaceId: "ws-1",
       threadId: "thread-1",
       itemId: "item-2",
       text: "Done",
+      phase: "final_answer",
+      turnId: "turn-1",
+      timestampMs: 1_700_000_000_000,
     });
 
     act(() => {

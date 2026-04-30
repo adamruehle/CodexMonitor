@@ -67,6 +67,7 @@ import { useTrayRecentThreads } from "@app/hooks/useTrayRecentThreads";
 import { useTraySessionUsage } from "@app/hooks/useTraySessionUsage";
 import { useTauriEvent } from "@app/hooks/useTauriEvent";
 import { useAppBootstrapOrchestration } from "@app/bootstrap/useAppBootstrapOrchestration";
+import type { MessageGroupControlsApi } from "@/features/messages/components/messageGroupControls";
 import {
   useThreadCodexBootstrapOrchestration,
   useThreadCodexSyncOrchestration,
@@ -310,6 +311,8 @@ export default function MainApp() {
   const [selectedCodexArgsOverride, setSelectedCodexArgsOverride] = useState<string | null>(
     null,
   );
+  const [messageGroupControls, setMessageGroupControls] =
+    useState<MessageGroupControlsApi | null>(null);
   const [selectedServiceTier, setSelectedServiceTier] = useState<
     ServiceTier | null | undefined
   >(undefined);
@@ -516,6 +519,9 @@ export default function MainApp() {
     threadSortKey: threadListSortKey,
     onThreadCodexMetadataDetected: handleThreadCodexMetadataDetected,
   });
+  useEffect(() => {
+    setMessageGroupControls(null);
+  }, [activeThreadId, activeWorkspaceId]);
   const { connectionState: remoteThreadConnectionState, reconnectLive } =
     useRemoteThreadLiveConnection({
       backendMode: appSettings.backendMode,
@@ -1629,6 +1635,8 @@ export default function MainApp() {
     onPlanSubmitChanges: handlePlanSubmitChanges,
     activePlan,
     activeTokenUsage,
+    messageGroupControls,
+    onMessageGroupControlsChange: setMessageGroupControls,
     latestAgentRuns,
     isLoadingLatestAgents,
     localUsageSnapshot,

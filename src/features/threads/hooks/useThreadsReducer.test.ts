@@ -744,4 +744,57 @@ describe("threadReducer", () => {
     expect(trimmed.itemsByThread["thread-1"]?.[0]?.id).toBe("msg-2");
   });
 
+  it("preserves raw command rows when hydrating thread items", () => {
+    const next = threadReducer(initialState, {
+      type: "setThreadItems",
+      threadId: "thread-1",
+      items: [
+        {
+          id: "cmd-read",
+          kind: "tool",
+          toolType: "commandExecution",
+          title: "Command: sed -n '1,20p' src/foo.ts",
+          detail: "",
+          status: "completed",
+          output: "export const foo = 1;",
+        },
+        {
+          id: "cmd-search",
+          kind: "tool",
+          toolType: "commandExecution",
+          title: "Command: rg foo src",
+          detail: "",
+          status: "completed",
+          output: "src/foo.ts:1:export const foo = 1;",
+        },
+      ],
+    });
+
+    expect(next.itemsByThread["thread-1"]).toHaveLength(2);
+    expect(next.itemsByThread["thread-1"]?.every((item) => item.kind === "tool")).toBe(
+      true,
+    );
+  });
+
+  it("preserves raw command rows for live upserts", () => {
+    const next = threadReducer(initialState, {
+      type: "upsertItem",
+      workspaceId: "ws-1",
+      threadId: "thread-1",
+      item: {
+        id: "cmd-live",
+        kind: "tool",
+        toolType: "commandExecution",
+        title: "Command: rg foo src",
+        detail: "",
+        status: "completed",
+        output: "src/foo.ts:1:foo",
+      },
+      hasCustomName: false,
+    });
+
+    expect(next.itemsByThread["thread-1"]).toHaveLength(1);
+    expect(next.itemsByThread["thread-1"]?.[0]?.kind).toBe("tool");
+  });
+
 });

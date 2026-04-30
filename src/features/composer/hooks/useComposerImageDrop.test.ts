@@ -147,6 +147,26 @@ describe("useComposerImageDrop", () => {
     restoreFileReader();
   });
 
+  it("treats extension-only dropped files as images when mime metadata is missing", async () => {
+    const restoreFileReader = setMockFileReader();
+    const onAttachImages = vi.fn();
+    const hook = renderImageDropHook({ disabled: false, onAttachImages });
+
+    const file = new File(["data"], "photo.png");
+
+    await act(async () => {
+      await hook.result.handleDrop({
+        dataTransfer: { files: [file], items: [] },
+        preventDefault: vi.fn(),
+      } as unknown as React.DragEvent<HTMLElement>);
+    });
+
+    expect(onAttachImages).toHaveBeenCalledWith(["data:;base64,MOCK"]);
+
+    hook.unmount();
+    restoreFileReader();
+  });
+
   it("handles pasted image items", async () => {
     const restoreFileReader = setMockFileReader();
     const onAttachImages = vi.fn();
@@ -224,6 +244,43 @@ describe("useComposerImageDrop", () => {
     hook.unmount();
   });
 
+  it("accepts scaled tauri window-drop coordinates when browser dragover never fired", async () => {
+    const onAttachImages = vi.fn();
+    const hook = renderImageDropHook({ disabled: false, onAttachImages });
+
+    const target = document.createElement("div");
+    target.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, right: 100, bottom: 100 } as DOMRect);
+    hook.result.dropTargetRef.current = target;
+
+    Object.defineProperty(window, "devicePixelRatio", {
+      value: 2,
+      configurable: true,
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    if (!mockOnDragDropEvent) {
+      throw new Error("Drag drop handler not registered");
+    }
+
+    act(() => {
+      mockOnDragDropEvent?.({
+        payload: {
+          type: "drop",
+          position: { x: 160, y: 160 },
+          paths: ["/tmp/photo.png"],
+        },
+      });
+    });
+
+    expect(onAttachImages).toHaveBeenCalledWith(["/tmp/photo.png"]);
+
+    hook.unmount();
+  });
+
   it("accepts heic paths from tauri drag-drop", async () => {
     const onAttachImages = vi.fn();
     const hook = renderImageDropHook({ disabled: false, onAttachImages });
@@ -253,6 +310,87 @@ describe("useComposerImageDrop", () => {
 
     expect(onAttachImages).toHaveBeenCalledWith(["/tmp/screenshot.heic"]);
 
+    hook.unmount();
+  });
+
+  it("accepts native image drops even when window coordinates are unreliable", async () => {
+    const onAttachImages = vi.fn();
+    const hook = renderImageDropHook({ disabled: false, onAttachImages });
+
+    const target = document.createElement("div");
+    target.getBoundingClientRect = () =>
+      ({ left: 500, top: 500, right: 600, bottom: 600 } as DOMRect);
+    hook.result.dropTargetRef.current = target;
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    if (!mockOnDragDropEvent) {
+      throw new Error("Drag drop handler not registered");
+    }
+
+    act(() => {
+      mockOnDragDropEvent?.({
+        payload: {
+          type: "enter",
+          position: { x: 10, y: 10 },
+          paths: ["/tmp/photo.png"],
+        },
+      });
+    });
+
+    expect(hook.result.isDragOver).toBe(true);
+
+    act(() => {
+      mockOnDragDropEvent?.({
+        payload: {
+          type: "drop",
+          position: { x: 10, y: 10 },
+          paths: ["/tmp/photo.png"],
+        },
+      });
+    });
+
+    expect(onAttachImages).toHaveBeenCalledWith(["/tmp/photo.png"]);
+
+    hook.unmount();
+  });
+
+  it("accepts tauri drops when focus is already inside the composer", async () => {
+    const onAttachImages = vi.fn();
+    const hook = renderImageDropHook({ disabled: false, onAttachImages });
+
+    const target = document.createElement("div");
+    target.getBoundingClientRect = () =>
+      ({ left: 500, top: 500, right: 600, bottom: 600 } as DOMRect);
+    const textarea = document.createElement("textarea");
+    target.appendChild(textarea);
+    document.body.appendChild(target);
+    hook.result.dropTargetRef.current = target;
+    textarea.focus();
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    if (!mockOnDragDropEvent) {
+      throw new Error("Drag drop handler not registered");
+    }
+
+    act(() => {
+      mockOnDragDropEvent?.({
+        payload: {
+          type: "drop",
+          position: { x: 10, y: 10 },
+          paths: ["/tmp/photo.png"],
+        },
+      });
+    });
+
+    expect(onAttachImages).toHaveBeenCalledWith(["/tmp/photo.png"]);
+
+    target.remove();
     hook.unmount();
   });
 

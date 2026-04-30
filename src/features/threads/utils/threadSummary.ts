@@ -13,6 +13,15 @@ import {
 } from "@threads/utils/threadRpc";
 import { clampThreadName } from "@threads/utils/threadNaming";
 
+function getThreadDisplayName(thread: Record<string, unknown>): string | null {
+  const title = asString(thread.title ?? thread.threadName ?? thread.thread_name).trim();
+  if (title) {
+    return title;
+  }
+  const preview = asString(thread.preview ?? "").trim();
+  return clampThreadName(preview);
+}
+
 type BuildThreadSummaryFromThreadOptions = {
   workspaceId: string;
   thread: Record<string, unknown>;
@@ -46,12 +55,11 @@ export function buildThreadSummaryFromThread({
   if (!id) {
     return null;
   }
-  const preview = asString(thread.preview ?? "").trim();
   const customName = getCustomName?.(workspaceId, id);
   const fallbackName = `Agent ${fallbackIndex + 1}`;
   const name = customName
     ? customName
-    : clampThreadName(preview) ?? fallbackName;
+    : getThreadDisplayName(thread) ?? fallbackName;
   const metadata = extractThreadCodexMetadata(thread);
   if (shouldHideSubagentThreadFromSidebar(thread.source)) {
     return null;

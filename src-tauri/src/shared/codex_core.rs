@@ -1,6 +1,9 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+use chrono::DateTime;
 use serde_json::{json, Map, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -30,6 +33,862 @@ const THREAD_LIST_SOURCE_KINDS: &[&str] = &[
     "subAgentThreadSpawn",
     "unknown",
 ];
+
+fn load_codex_session_title_index() -> HashMap<String, String> {
+    let Some(codex_home) = resolve_default_codex_home() else {
+        return HashMap::new();
+    };
+    let path = codex_home.join("session_index.jsonl");
+    let file = match File::open(&path) {
+        Ok(file) => file,
+        Err(_) => return HashMap::new(),
+    };
+
+    let mut titles = HashMap::new();
+    for line in BufReader::new(file).lines() {
+        let Ok(line) = line else {
+            continue;
+        };
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
+            continue;
+        };
+        let Some(id) = value.get("id").and_then(Value::as_str).map(str::trim) else {
+            continue;
+        };
+        if id.is_empty() {
+            continue;
+        }
+        let Some(thread_name) = value
+            .get("thread_name")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        else {
+            continue;
+        };
+        titles.insert(id.to_string(), thread_name.to_string());
+    }
+
+    titles
+}
+
+fn apply_session_title_to_thread(
+    thread: &mut Map<String, Value>,
+    titles: &HashMap<String, String>,
+) {
+    let Some(thread_id) = thread
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    else {
+        return;
+    };
+    let Some(title) = titles.get(thread_id) else {
+        return;
+    };
+    thread.insert("title".to_string(), Value::String(title.clone()));
+}
+
+fn enrich_thread_response_titles(value: &mut Value, titles: &HashMap<String, String>) {
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
+
+    if let Some(result) = obj.get_mut("result").and_then(Value::as_object_mut) {
+        if let Some(thread) = result.get_mut("thread").and_then(Value::as_object_mut) {
+            apply_session_title_to_thread(thread, titles);
+        }
+        if let Some(threads) = result.get_mut("threads").and_then(Value::as_array_mut) {
+            for thread in threads {
+                if let Some(thread_obj) = thread.as_object_mut() {
+                    apply_session_title_to_thread(thread_obj, titles);
+                }
+            }
+        }
+        if let Some(threads) = result.get_mut("data").and_then(Value::as_array_mut) {
+            for thread in threads {
+                if let Some(thread_obj) = thread.as_object_mut() {
+                    apply_session_title_to_thread(thread_obj, titles);
+                }
+            }
+        }
+    }
+
+    if let Some(thread) = obj.get_mut("thread").and_then(Value::as_object_mut) {
+        apply_session_title_to_thread(thread, titles);
+    }
+    if let Some(threads) = obj.get_mut("threads").and_then(Value::as_array_mut) {
+        for thread in threads {
+            if let Some(thread_obj) = thread.as_object_mut() {
+                apply_session_title_to_thread(thread_obj, titles);
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PendingReplayToolCall {
+    call_id: String,
+    turn_id: String,
+    name: String,
+    arguments: Value,
+    order: usize,
+}
+
+#[derive(Clone, Debug)]
+struct ReplayedThreadItem {
+    item: Value,
+    order: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+enum ReplayTimelineMarkerKind {
+    UserMessage,
+    AgentMessage,
+    Reasoning,
+}
+
+#[derive(Clone, Debug)]
+enum ReplayTimelineEntry {
+    ExistingMarker {
+        kind: ReplayTimelineMarkerKind,
+        order: usize,
+    },
+    ExistingItemId {
+        item_id: String,
+        order: usize,
+    },
+    ReplayedItem(ReplayedThreadItem),
+}
+
+#[derive(Clone, Debug)]
+struct ReplayedMessage {
+    role: ReplayTimelineMarkerKind,
+    text: String,
+    phase: Option<String>,
+    timestamp_ms: Option<i64>,
+    order: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ReplayedTurnData {
+    timeline: Vec<ReplayTimelineEntry>,
+    messages: Vec<ReplayedMessage>,
+}
+
+#[derive(Clone, Debug)]
+struct ReplayedCommandSession {
+    turn_id: String,
+    item_id: String,
+    command: String,
+    cwd: String,
+    output: String,
+    status: String,
+    order: usize,
+}
+
+fn enrich_thread_response_replay(value: &mut Value) {
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
+
+    if let Some(result) = obj.get_mut("result").and_then(Value::as_object_mut) {
+        if let Some(thread) = result.get_mut("thread").and_then(Value::as_object_mut) {
+            enrich_thread_replay_items(thread);
+        }
+    }
+
+    if let Some(thread) = obj.get_mut("thread").and_then(Value::as_object_mut) {
+        enrich_thread_replay_items(thread);
+    }
+}
+
+fn enrich_thread_replay_items(thread: &mut Map<String, Value>) {
+    let Some(path) = thread
+        .get("path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(|path| path.to_string())
+    else {
+        return;
+    };
+    let Some(turns) = thread.get_mut("turns").and_then(Value::as_array_mut) else {
+        return;
+    };
+
+    let replayed_by_turn = load_replayed_thread_items(Path::new(&path));
+    if replayed_by_turn.is_empty() {
+        return;
+    }
+
+    for turn in turns {
+        let Some(turn_obj) = turn.as_object_mut() else {
+            continue;
+        };
+        let Some(turn_id) = turn_obj
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        else {
+            continue;
+        };
+        let Some(replayed_turn) = replayed_by_turn.get(turn_id).cloned() else {
+            continue;
+        };
+        if replayed_turn.timeline.is_empty() {
+            continue;
+        }
+
+        let items = turn_obj
+            .entry("items".to_string())
+            .or_insert_with(|| Value::Array(Vec::new()));
+        let Some(items_array) = items.as_array_mut() else {
+            continue;
+        };
+        let merged_items = merge_replayed_turn_items(
+            items_array,
+            &replayed_turn.timeline,
+            &replayed_turn.messages,
+        );
+        *items_array = merged_items;
+    }
+}
+
+fn load_replayed_thread_items(path: &Path) -> HashMap<String, ReplayedTurnData> {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(_) => return HashMap::new(),
+    };
+
+    let mut current_turn_id: Option<String> = None;
+    let mut order = 0usize;
+    let mut pending_calls: HashMap<String, PendingReplayToolCall> = HashMap::new();
+    let mut replayed_by_turn: HashMap<String, ReplayedTurnData> = HashMap::new();
+    let mut command_sessions: HashMap<String, ReplayedCommandSession> = HashMap::new();
+
+    for line in BufReader::new(file).lines() {
+        let Ok(line) = line else {
+            continue;
+        };
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
+            continue;
+        };
+
+        if let Some(turn_id) = extract_replay_turn_id(&value) {
+            current_turn_id = Some(turn_id);
+        }
+
+        let entry_type = value.get("type").and_then(Value::as_str).unwrap_or("");
+        if entry_type != "response_item" {
+            continue;
+        }
+
+        let Some(payload) = value.get("payload").and_then(Value::as_object) else {
+            continue;
+        };
+        let payload_type = payload.get("type").and_then(Value::as_str).unwrap_or("");
+        match payload_type {
+            "function_call" => {
+                let Some(call_id) = payload
+                    .get("call_id")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|call_id| !call_id.is_empty())
+                else {
+                    continue;
+                };
+                let Some(turn_id) = current_turn_id.clone() else {
+                    continue;
+                };
+                let name = payload
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .unwrap_or("")
+                    .to_string();
+                let arguments = parse_replay_arguments(payload.get("arguments"));
+                pending_calls.insert(
+                    call_id.to_string(),
+                    PendingReplayToolCall {
+                        call_id: call_id.to_string(),
+                        turn_id,
+                        name,
+                        arguments,
+                        order,
+                    },
+                );
+                order += 1;
+            }
+            "function_call_output" => {
+                let Some(call_id) = payload
+                    .get("call_id")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|call_id| !call_id.is_empty())
+                else {
+                    continue;
+                };
+                let Some(pending) = pending_calls.remove(call_id) else {
+                    continue;
+                };
+                let raw_output = payload
+                    .get("output")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                replay_function_call_output(
+                    pending,
+                    &raw_output,
+                    &mut replayed_by_turn,
+                    &mut command_sessions,
+                );
+                order += 1;
+            }
+            "message" => {
+                let Some(turn_id) = current_turn_id.clone() else {
+                    continue;
+                };
+                let role = payload
+                    .get("role")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .unwrap_or("");
+                let Some(kind) = (match role {
+                    "user" => Some(ReplayTimelineMarkerKind::UserMessage),
+                    "assistant" => Some(ReplayTimelineMarkerKind::AgentMessage),
+                    _ => None,
+                }) else {
+                    continue;
+                };
+                let turn_data = replayed_by_turn.entry(turn_id).or_default();
+                let text = extract_replay_message_text(payload, kind);
+                if !text.is_empty() {
+                    turn_data.messages.push(ReplayedMessage {
+                        role: kind,
+                        text,
+                        phase: extract_replay_message_phase(payload),
+                        timestamp_ms: read_replay_timestamp_ms(&value),
+                        order,
+                    });
+                }
+                turn_data
+                    .timeline
+                    .push(ReplayTimelineEntry::ExistingMarker { kind, order });
+                order += 1;
+            }
+            "reasoning" => {
+                let Some(turn_id) = current_turn_id.clone() else {
+                    continue;
+                };
+                replayed_by_turn.entry(turn_id).or_default().timeline.push(
+                    ReplayTimelineEntry::ExistingMarker {
+                        kind: ReplayTimelineMarkerKind::Reasoning,
+                        order,
+                    },
+                );
+                order += 1;
+            }
+            _ => {
+                let Some(turn_id) = current_turn_id.clone() else {
+                    continue;
+                };
+                let Some(item_id) = payload
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|item_id| !item_id.is_empty())
+                else {
+                    continue;
+                };
+                replayed_by_turn.entry(turn_id).or_default().timeline.push(
+                    ReplayTimelineEntry::ExistingItemId {
+                        item_id: item_id.to_string(),
+                        order,
+                    },
+                );
+                order += 1;
+            }
+        }
+    }
+
+    for session in command_sessions.into_values() {
+        replayed_by_turn
+            .entry(session.turn_id.clone())
+            .or_default()
+            .timeline
+            .push(ReplayTimelineEntry::ReplayedItem(ReplayedThreadItem {
+                item: build_replayed_command_item(&session),
+                order: session.order,
+            }));
+    }
+
+    for turn_data in replayed_by_turn.values_mut() {
+        turn_data.timeline.sort_by_key(replay_timeline_entry_order);
+    }
+
+    replayed_by_turn
+}
+
+fn replay_timeline_entry_order(entry: &ReplayTimelineEntry) -> usize {
+    match entry {
+        ReplayTimelineEntry::ExistingMarker { order, .. }
+        | ReplayTimelineEntry::ExistingItemId { order, .. } => *order,
+        ReplayTimelineEntry::ReplayedItem(item) => item.order,
+    }
+}
+
+fn classify_existing_turn_item(item: &Value) -> Option<ReplayTimelineMarkerKind> {
+    match item.get("type").and_then(Value::as_str).unwrap_or("") {
+        "userMessage" => Some(ReplayTimelineMarkerKind::UserMessage),
+        "agentMessage" => Some(ReplayTimelineMarkerKind::AgentMessage),
+        "message" => match item.get("role").and_then(Value::as_str).unwrap_or("") {
+            "user" => Some(ReplayTimelineMarkerKind::UserMessage),
+            "assistant" => Some(ReplayTimelineMarkerKind::AgentMessage),
+            _ => None,
+        },
+        "reasoning" => Some(ReplayTimelineMarkerKind::Reasoning),
+        _ => None,
+    }
+}
+
+fn next_unemitted_kind_index(queue: &mut VecDeque<usize>, emitted: &[bool]) -> Option<usize> {
+    while let Some(index) = queue.pop_front() {
+        if !emitted.get(index).copied().unwrap_or(false) {
+            return Some(index);
+        }
+    }
+    None
+}
+
+fn merge_replayed_turn_items(
+    items_array: &[Value],
+    timeline: &[ReplayTimelineEntry],
+    messages: &[ReplayedMessage],
+) -> Vec<Value> {
+    let existing_items = items_array.to_vec();
+    let existing_ids: HashMap<String, usize> = existing_items
+        .iter()
+        .enumerate()
+        .filter_map(|(index, item)| {
+            item.get("id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(|id| (id.to_string(), index))
+        })
+        .collect();
+
+    let mut by_kind: HashMap<ReplayTimelineMarkerKind, VecDeque<usize>> = HashMap::new();
+    for (index, item) in existing_items.iter().enumerate() {
+        if let Some(kind) = classify_existing_turn_item(item) {
+            by_kind.entry(kind).or_default().push_back(index);
+        }
+    }
+
+    let mut emitted = vec![false; existing_items.len()];
+    let mut merged: Vec<Value> = Vec::new();
+
+    for entry in timeline {
+        match entry {
+            ReplayTimelineEntry::ExistingItemId { item_id, .. } => {
+                let Some(index) = existing_ids.get(item_id).copied() else {
+                    continue;
+                };
+                if emitted[index] {
+                    continue;
+                }
+                emitted[index] = true;
+                merged.push(existing_items[index].clone());
+            }
+            ReplayTimelineEntry::ExistingMarker { kind, order } => {
+                if let Some(index) = by_kind
+                    .get_mut(kind)
+                    .and_then(|queue| next_unemitted_kind_index(queue, &emitted))
+                {
+                    emitted[index] = true;
+                    let matched_message = messages
+                        .iter()
+                        .find(|message| message.role == *kind && message.order == *order);
+                    merged.push(match matched_message {
+                        Some(message) => {
+                            merge_replayed_message_metadata(&existing_items[index], message)
+                        }
+                        None => existing_items[index].clone(),
+                    });
+                    continue;
+                }
+                if let Some(message) = messages
+                    .iter()
+                    .find(|message| message.role == *kind && message.order == *order)
+                {
+                    merged.push(build_replayed_message_item(message));
+                }
+            }
+            ReplayTimelineEntry::ReplayedItem(replayed) => {
+                let item_id = replayed
+                    .item
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .unwrap_or("");
+                if let Some(index) = existing_ids.get(item_id).copied() {
+                    if emitted[index] {
+                        continue;
+                    }
+                    emitted[index] = true;
+                    merged.push(merge_replayed_item(&existing_items[index], &replayed.item));
+                    continue;
+                }
+                merged.push(replayed.item.clone());
+            }
+        }
+    }
+
+    for (index, item) in existing_items.into_iter().enumerate() {
+        if emitted[index] {
+            continue;
+        }
+        merged.push(item);
+    }
+
+    merged
+}
+
+fn merge_replayed_message_metadata(existing: &Value, message: &ReplayedMessage) -> Value {
+    let mut merged = existing.clone();
+    let Some(object) = merged.as_object_mut() else {
+        return merged;
+    };
+    if let Some(timestamp_ms) = message.timestamp_ms {
+        if !object.contains_key("timestampMs") && !object.contains_key("timestamp_ms") {
+            object.insert("timestampMs".to_string(), json!(timestamp_ms));
+        }
+    }
+    if message.role == ReplayTimelineMarkerKind::AgentMessage {
+        if let Some(phase) = &message.phase {
+            object.insert("phase".to_string(), json!(phase));
+        }
+    }
+    merged
+}
+
+fn merge_replayed_item(existing: &Value, replayed: &Value) -> Value {
+    let Some(existing_obj) = existing.as_object() else {
+        return replayed.clone();
+    };
+    let Some(replayed_obj) = replayed.as_object() else {
+        return replayed.clone();
+    };
+
+    let mut merged = existing_obj.clone();
+    for (key, value) in replayed_obj {
+        merged.insert(key.clone(), value.clone());
+    }
+    Value::Object(merged)
+}
+
+fn read_replay_timestamp_ms(value: &Value) -> Option<i64> {
+    value
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .and_then(|text| DateTime::parse_from_rfc3339(text).ok())
+        .map(|timestamp| timestamp.timestamp_millis())
+}
+
+fn extract_replay_message_phase(payload: &Map<String, Value>) -> Option<String> {
+    payload
+        .get("phase")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|phase| !phase.is_empty())
+        .map(|phase| phase.to_string())
+}
+
+fn extract_replay_message_text(
+    payload: &Map<String, Value>,
+    role: ReplayTimelineMarkerKind,
+) -> String {
+    let Some(content) = payload.get("content").and_then(Value::as_array) else {
+        return String::new();
+    };
+
+    content
+        .iter()
+        .filter_map(|entry| {
+            let entry = entry.as_object()?;
+            let entry_type = entry.get("type").and_then(Value::as_str).unwrap_or("");
+            let text = entry
+                .get("text")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())?;
+            match role {
+                ReplayTimelineMarkerKind::UserMessage
+                    if matches!(entry_type, "input_text" | "text") =>
+                {
+                    Some(text.to_string())
+                }
+                ReplayTimelineMarkerKind::AgentMessage
+                    if matches!(entry_type, "output_text" | "text") =>
+                {
+                    Some(text.to_string())
+                }
+                _ => None,
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn build_replayed_message_item(message: &ReplayedMessage) -> Value {
+    match message.role {
+        ReplayTimelineMarkerKind::UserMessage => json!({
+            "type": "userMessage",
+            "id": format!("replay-user-message-{}", message.order),
+            "content": [
+                {
+                    "type": "text",
+                    "text": message.text,
+                }
+            ],
+            "timestampMs": message.timestamp_ms,
+        }),
+        ReplayTimelineMarkerKind::AgentMessage => {
+            let mut item = json!({
+                "type": "agentMessage",
+                "id": format!("replay-agent-message-{}", message.order),
+                "text": message.text,
+                "timestampMs": message.timestamp_ms,
+            });
+            if let Some(phase) = &message.phase {
+                if let Some(object) = item.as_object_mut() {
+                    object.insert("phase".to_string(), json!(phase));
+                }
+            }
+            item
+        }
+        ReplayTimelineMarkerKind::Reasoning => Value::Null,
+    }
+}
+
+fn extract_replay_turn_id(value: &Value) -> Option<String> {
+    value
+        .get("turn_id")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            value
+                .get("payload")
+                .and_then(Value::as_object)
+                .and_then(|payload| payload.get("turn_id").or_else(|| payload.get("turnId")))
+                .and_then(Value::as_str)
+        })
+        .map(str::trim)
+        .filter(|turn_id| !turn_id.is_empty())
+        .map(|turn_id| turn_id.to_string())
+}
+
+fn parse_replay_arguments(raw: Option<&Value>) -> Value {
+    match raw {
+        Some(Value::String(text)) => serde_json::from_str::<Value>(text).unwrap_or(Value::Null),
+        Some(value) => value.clone(),
+        None => Value::Null,
+    }
+}
+
+fn replay_function_call_output(
+    pending: PendingReplayToolCall,
+    raw_output: &str,
+    replayed_by_turn: &mut HashMap<String, ReplayedTurnData>,
+    command_sessions: &mut HashMap<String, ReplayedCommandSession>,
+) {
+    match pending.name.as_str() {
+        "exec_command" => {
+            replay_exec_command_output(pending, raw_output, replayed_by_turn, command_sessions);
+        }
+        "write_stdin" => {
+            replay_write_stdin_output(pending, raw_output, command_sessions);
+        }
+        _ => {}
+    }
+}
+
+fn replay_exec_command_output(
+    pending: PendingReplayToolCall,
+    raw_output: &str,
+    replayed_by_turn: &mut HashMap<String, ReplayedTurnData>,
+    command_sessions: &mut HashMap<String, ReplayedCommandSession>,
+) {
+    let command = pending
+        .arguments
+        .get("cmd")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("")
+        .to_string();
+    let cwd = pending
+        .arguments
+        .get("workdir")
+        .or_else(|| pending.arguments.get("cwd"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("")
+        .to_string();
+    let session_id = extract_running_session_id(raw_output);
+    let chunk_output = extract_chunk_output(raw_output);
+    let status = extract_command_status(raw_output);
+
+    if let Some(session_id) = session_id {
+        let entry = command_sessions
+            .entry(session_id)
+            .or_insert_with(|| ReplayedCommandSession {
+                turn_id: pending.turn_id.clone(),
+                item_id: pending.call_id.clone(),
+                command: command.clone(),
+                cwd: cwd.clone(),
+                output: String::new(),
+                status: "running".to_string(),
+                order: pending.order,
+            });
+        append_command_output(&mut entry.output, &chunk_output);
+        if !status.is_empty() {
+            entry.status = status;
+        }
+        return;
+    }
+
+    replayed_by_turn
+        .entry(pending.turn_id.clone())
+        .or_default()
+        .timeline
+        .push(ReplayTimelineEntry::ReplayedItem(ReplayedThreadItem {
+            item: json!({
+                "type": "commandExecution",
+                "id": pending.call_id,
+                "command": command,
+                "cwd": cwd,
+                "status": if status.is_empty() { "completed" } else { status.as_str() },
+                "aggregatedOutput": chunk_output,
+            }),
+            order: pending.order,
+        }));
+}
+
+fn replay_write_stdin_output(
+    pending: PendingReplayToolCall,
+    raw_output: &str,
+    command_sessions: &mut HashMap<String, ReplayedCommandSession>,
+) {
+    let Some(session_id) = pending
+        .arguments
+        .get("session_id")
+        .or_else(|| pending.arguments.get("sessionId"))
+        .and_then(|value| {
+            value
+                .as_i64()
+                .map(|number| number.to_string())
+                .or_else(|| value.as_str().map(|text| text.trim().to_string()))
+        })
+        .filter(|value| !value.is_empty())
+    else {
+        return;
+    };
+    let Some(entry) = command_sessions.get_mut(&session_id) else {
+        return;
+    };
+
+    let stdin = pending
+        .arguments
+        .get("chars")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if !stdin.is_empty() {
+        append_command_output(
+            &mut entry.output,
+            &format!(
+                "[stdin]\n{}",
+                if stdin.ends_with('\n') {
+                    stdin.to_string()
+                } else {
+                    format!("{stdin}\n")
+                }
+            ),
+        );
+    }
+
+    let chunk_output = extract_chunk_output(raw_output);
+    append_command_output(&mut entry.output, &chunk_output);
+
+    let status = extract_command_status(raw_output);
+    if !status.is_empty() {
+        entry.status = status;
+    }
+}
+
+fn build_replayed_command_item(session: &ReplayedCommandSession) -> Value {
+    json!({
+        "type": "commandExecution",
+        "id": session.item_id,
+        "command": session.command,
+        "cwd": session.cwd,
+        "status": session.status,
+        "aggregatedOutput": session.output,
+    })
+}
+
+fn append_command_output(buffer: &mut String, chunk: &str) {
+    let trimmed = chunk.trim_end();
+    if trimmed.is_empty() {
+        return;
+    }
+    if !buffer.is_empty() {
+        buffer.push_str("\n");
+    }
+    buffer.push_str(trimmed);
+}
+
+fn extract_running_session_id(output: &str) -> Option<String> {
+    output
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("Process running with session ID "))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string())
+}
+
+fn extract_chunk_output(output: &str) -> String {
+    output
+        .split_once("\nOutput:\n")
+        .map(|(_, tail)| tail.to_string())
+        .unwrap_or_else(|| output.to_string())
+}
+
+fn extract_command_status(output: &str) -> String {
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if let Some(code) = trimmed.strip_prefix("Process exited with code ") {
+            return if code.trim() == "0" {
+                "completed".to_string()
+            } else {
+                "failed".to_string()
+            };
+        }
+        if trimmed.starts_with("Process running with session ID ") {
+            return "running".to_string();
+        }
+    }
+    String::new()
+}
 
 #[allow(dead_code)]
 fn image_extension_for_path(path: &str) -> Option<String> {
@@ -271,9 +1130,15 @@ pub(crate) async fn resume_thread_core(
 ) -> Result<Value, String> {
     let session = get_session_clone(sessions, &workspace_id).await?;
     let params = json!({ "threadId": thread_id });
-    session
+    let mut response = session
         .send_request_for_workspace(&workspace_id, "thread/resume", params)
-        .await
+        .await?;
+    let session_titles = load_codex_session_title_index();
+    if !session_titles.is_empty() {
+        enrich_thread_response_titles(&mut response, &session_titles);
+    }
+    enrich_thread_response_replay(&mut response);
+    Ok(response)
 }
 
 pub(crate) async fn read_thread_core(
@@ -283,9 +1148,15 @@ pub(crate) async fn read_thread_core(
 ) -> Result<Value, String> {
     let session = get_session_clone(sessions, &workspace_id).await?;
     let params = json!({ "threadId": thread_id });
-    session
+    let mut response = session
         .send_request_for_workspace(&workspace_id, "thread/read", params)
-        .await
+        .await?;
+    let session_titles = load_codex_session_title_index();
+    if !session_titles.is_empty() {
+        enrich_thread_response_titles(&mut response, &session_titles);
+    }
+    enrich_thread_response_replay(&mut response);
+    Ok(response)
 }
 
 pub(crate) async fn thread_live_subscribe_core(
@@ -342,9 +1213,14 @@ pub(crate) async fn list_threads_core(
         // (for example memory consolidation) do not leak back into app state.
         "sourceKinds": THREAD_LIST_SOURCE_KINDS
     });
-    session
+    let mut response = session
         .send_request_for_workspace(&workspace_id, "thread/list", params)
-        .await
+        .await?;
+    let session_titles = load_codex_session_title_index();
+    if !session_titles.is_empty() {
+        enrich_thread_response_titles(&mut response, &session_titles);
+    }
+    Ok(response)
 }
 
 pub(crate) async fn list_mcp_server_status_core(
@@ -892,6 +1768,7 @@ pub(crate) async fn get_config_model_core(
 mod tests {
     use super::*;
     use serde_json::Value;
+    use std::io::Write;
 
     #[test]
     fn normalize_strips_file_uri_prefix() {
@@ -1029,5 +1906,610 @@ mod tests {
         assert!(THREAD_LIST_SOURCE_KINDS.contains(&"subAgentReview"));
         assert!(THREAD_LIST_SOURCE_KINDS.contains(&"subAgentCompact"));
         assert!(THREAD_LIST_SOURCE_KINDS.contains(&"subAgentThreadSpawn"));
+    }
+
+    #[test]
+    fn enrich_thread_response_titles_updates_result_data_threads() {
+        let mut response = json!({
+            "result": {
+                "data": [
+                    { "id": "thread-1", "preview": "Fallback preview" },
+                    { "id": "thread-2", "preview": "Another preview" }
+                ]
+            }
+        });
+        let titles = HashMap::from([
+            ("thread-1".to_string(), "Saved Thread Title".to_string()),
+            ("thread-2".to_string(), "Second Saved Title".to_string()),
+        ]);
+
+        enrich_thread_response_titles(&mut response, &titles);
+
+        let data = response["result"]["data"].as_array().unwrap();
+        assert_eq!(data[0]["title"], json!("Saved Thread Title"));
+        assert_eq!(data[1]["title"], json!("Second Saved Title"));
+    }
+
+    fn write_temp_session_file(lines: &[String]) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "codex-monitor-replay-test-{}.jsonl",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let mut file = File::create(&path).expect("create temp session file");
+        for line in lines {
+            writeln!(file, "{line}").expect("write temp session line");
+        }
+        path
+    }
+
+    #[test]
+    fn enrich_thread_response_replay_restores_long_running_exec_command_output() {
+        let session_path = write_temp_session_file(&[
+            json!({
+                "timestamp": "2026-04-28T23:37:13.079Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "task_started",
+                    "turn_id": "turn-build",
+                }
+            })
+            .to_string(),
+            json!({
+                "timestamp": "2026-04-28T23:37:13.081Z",
+                "type": "turn_context",
+                "payload": {
+                    "turn_id": "turn-build",
+                    "cwd": "/tmp/repo",
+                }
+            })
+            .to_string(),
+            json!({
+                "timestamp": "2026-04-28T23:37:13.082Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "arguments": "{\"cmd\":\"npm run tauri:build\",\"workdir\":\"/tmp/repo\"}",
+                    "call_id": "call-build"
+                }
+            })
+            .to_string(),
+            json!({
+                "timestamp": "2026-04-28T23:37:13.083Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call-build",
+                    "output": "Chunk ID: 1\nWall time: 0.0000 seconds\nProcess running with session ID 50686\nOriginal token count: 1\nOutput:\n"
+                }
+            })
+            .to_string(),
+            json!({
+                "timestamp": "2026-04-28T23:38:35.258Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "write_stdin",
+                    "arguments": "{\"session_id\":50686,\"chars\":\"\",\"yield_time_ms\":1000}",
+                    "call_id": "call-poll-1"
+                }
+            })
+            .to_string(),
+            json!({
+                "timestamp": "2026-04-28T23:38:40.260Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call-poll-1",
+                    "output": "Chunk ID: 2\nWall time: 5.0017 seconds\nProcess running with session ID 50686\nOriginal token count: 1\nOutput:\nBundling Codex Monitor.app\n"
+                }
+            })
+            .to_string(),
+            json!({
+                "timestamp": "2026-04-28T23:38:55.644Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "write_stdin",
+                    "arguments": "{\"session_id\":50686,\"chars\":\"\",\"yield_time_ms\":1000}",
+                    "call_id": "call-poll-2"
+                }
+            })
+            .to_string(),
+            json!({
+                "timestamp": "2026-04-28T23:38:56.057Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call-poll-2",
+                    "output": "Chunk ID: 3\nWall time: 0.0000 seconds\nProcess exited with code 1\nOriginal token count: 1\nOutput:\nFinished bundles\nA public key has been found, but no private key.\n"
+                }
+            })
+            .to_string(),
+            json!({
+                "timestamp": "2026-04-28T23:39:05.219Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "arguments": "{\"cmd\":\"ls -lah src-tauri/target/release/bundle/macos\",\"workdir\":\"/tmp/repo\"}",
+                    "call_id": "call-ls"
+                }
+            })
+            .to_string(),
+            json!({
+                "timestamp": "2026-04-28T23:39:05.514Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call-ls",
+                    "output": "Chunk ID: 4\nWall time: 0.0000 seconds\nProcess exited with code 0\nOriginal token count: 1\nOutput:\nCodex Monitor.app\n"
+                }
+            })
+            .to_string(),
+        ]);
+
+        let mut response = json!({
+            "result": {
+                "thread": {
+                    "id": "thread-1",
+                    "path": session_path,
+                    "turns": [
+                        {
+                            "id": "turn-build",
+                            "items": [
+                                { "type": "userMessage", "id": "item-user", "content": [{ "type": "text", "text": "can you build it too?" }] },
+                                { "type": "agentMessage", "id": "item-agent", "text": "Building now." }
+                            ]
+                        }
+                    ]
+                }
+            }
+        });
+
+        enrich_thread_response_replay(&mut response);
+
+        let items = response["result"]["thread"]["turns"][0]["items"]
+            .as_array()
+            .unwrap();
+        let build = items
+            .iter()
+            .find(|item| item["id"] == json!("call-build"))
+            .expect("replayed build command item");
+        assert_eq!(build["type"], json!("commandExecution"));
+        assert_eq!(build["command"], json!("npm run tauri:build"));
+        assert_eq!(build["status"], json!("failed"));
+        let build_output = build["aggregatedOutput"]
+            .as_str()
+            .expect("build command output");
+        assert!(build_output.contains("Bundling Codex Monitor.app"));
+        assert!(build_output.contains("A public key has been found, but no private key."));
+
+        let ls_item = items
+            .iter()
+            .find(|item| item["id"] == json!("call-ls"))
+            .expect("replayed ls command item");
+        assert_eq!(ls_item["type"], json!("commandExecution"));
+        assert_eq!(ls_item["status"], json!("completed"));
+        assert_eq!(ls_item["aggregatedOutput"], json!("Codex Monitor.app\n"));
+
+        let _ = std::fs::remove_file(session_path);
+    }
+
+    #[test]
+    fn enrich_thread_response_replay_preserves_tool_chronology_with_existing_messages() {
+        let session_path = write_temp_session_file(&[
+            json!({
+                "timestamp": "2026-04-28T23:37:13.079Z",
+                "type": "response_item",
+                "turn_id": "turn-ordered",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "debug this" }]
+                }
+            })
+            .to_string(),
+            json!({
+                "timestamp": "2026-04-28T23:37:13.080Z",
+                "type": "response_item",
+                "turn_id": "turn-ordered",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "Checking the first thing." }]
+                }
+            })
+            .to_string(),
+            json!({
+                "timestamp": "2026-04-28T23:37:13.081Z",
+                "type": "response_item",
+                "turn_id": "turn-ordered",
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "arguments": "{\"cmd\":\"sed -n '1,20p' src/foo.ts\",\"workdir\":\"/tmp/repo\"}",
+                    "call_id": "call-read"
+                }
+            })
+            .to_string(),
+            json!({
+                "timestamp": "2026-04-28T23:37:13.082Z",
+                "type": "response_item",
+                "turn_id": "turn-ordered",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call-read",
+                    "output": "Chunk ID: 1\nWall time: 0.0000 seconds\nProcess exited with code 0\nOriginal token count: 1\nOutput:\nline 1\n"
+                }
+            })
+            .to_string(),
+            json!({
+                "timestamp": "2026-04-28T23:37:13.083Z",
+                "type": "response_item",
+                "turn_id": "turn-ordered",
+                "payload": {
+                    "type": "reasoning",
+                    "summary": [],
+                    "content": null
+                }
+            })
+            .to_string(),
+            json!({
+                "timestamp": "2026-04-28T23:37:13.084Z",
+                "type": "response_item",
+                "turn_id": "turn-ordered",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "Checking the second thing." }]
+                }
+            })
+            .to_string(),
+            json!({
+                "timestamp": "2026-04-28T23:37:13.085Z",
+                "type": "response_item",
+                "turn_id": "turn-ordered",
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "arguments": "{\"cmd\":\"rg foo src\",\"workdir\":\"/tmp/repo\"}",
+                    "call_id": "call-search"
+                }
+            })
+            .to_string(),
+            json!({
+                "timestamp": "2026-04-28T23:37:13.086Z",
+                "type": "response_item",
+                "turn_id": "turn-ordered",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call-search",
+                    "output": "Chunk ID: 2\nWall time: 0.0000 seconds\nProcess exited with code 0\nOriginal token count: 1\nOutput:\nsrc/foo.ts:1:foo\n"
+                }
+            })
+            .to_string(),
+        ]);
+
+        let mut response = json!({
+            "result": {
+                "thread": {
+                    "id": "thread-ordered",
+                    "path": session_path,
+                    "turns": [
+                        {
+                            "id": "turn-ordered",
+                            "items": [
+                                { "type": "userMessage", "id": "item-user", "content": [{ "type": "text", "text": "debug this" }] },
+                                { "type": "agentMessage", "id": "item-agent-1", "text": "Checking the first thing." },
+                                { "type": "reasoning", "id": "item-reasoning", "summary": [], "content": null },
+                                { "type": "agentMessage", "id": "item-agent-2", "text": "Checking the second thing." }
+                            ]
+                        }
+                    ]
+                }
+            }
+        });
+
+        enrich_thread_response_replay(&mut response);
+
+        let items = response["result"]["thread"]["turns"][0]["items"]
+            .as_array()
+            .unwrap();
+        let ordered_ids = items
+            .iter()
+            .filter_map(|item| item.get("id").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ordered_ids,
+            vec![
+                "item-user",
+                "item-agent-1",
+                "call-read",
+                "item-reasoning",
+                "item-agent-2",
+                "call-search",
+            ]
+        );
+
+        let _ = std::fs::remove_file(session_path);
+    }
+
+    #[test]
+    fn enrich_thread_response_replay_replaces_sparse_existing_command_items() {
+        let session_path = write_temp_session_file(&[
+            json!({
+                "timestamp": "2026-04-28T23:37:13.079Z",
+                "type": "response_item",
+                "turn_id": "turn-command",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "Building now." }]
+                }
+            })
+            .to_string(),
+            json!({
+                "timestamp": "2026-04-28T23:37:13.080Z",
+                "type": "response_item",
+                "turn_id": "turn-command",
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "arguments": "{\"cmd\":\"npm run tauri:build\",\"workdir\":\"/tmp/repo\"}",
+                    "call_id": "call-build"
+                }
+            })
+            .to_string(),
+            json!({
+                "timestamp": "2026-04-28T23:37:18.080Z",
+                "type": "response_item",
+                "turn_id": "turn-command",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call-build",
+                    "output": "Chunk ID: 1\nWall time: 5.0000 seconds\nProcess exited with code 0\nOriginal token count: 1\nOutput:\nBundled successfully\n"
+                }
+            })
+            .to_string(),
+        ]);
+
+        let mut response = json!({
+            "result": {
+                "thread": {
+                    "id": "thread-command",
+                    "path": session_path,
+                    "turns": [
+                        {
+                            "id": "turn-command",
+                            "items": [
+                                { "type": "agentMessage", "id": "item-agent", "text": "Building now." },
+                                {
+                                    "type": "commandExecution",
+                                    "id": "call-build",
+                                    "command": "npm run tauri:build",
+                                    "cwd": "/tmp/repo",
+                                    "status": "running",
+                                    "aggregatedOutput": ""
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        });
+
+        enrich_thread_response_replay(&mut response);
+
+        let items = response["result"]["thread"]["turns"][0]["items"]
+            .as_array()
+            .unwrap();
+        let build = items
+            .iter()
+            .find(|item| item["id"] == json!("call-build"))
+            .expect("merged build command item");
+        assert_eq!(build["type"], json!("commandExecution"));
+        assert_eq!(build["status"], json!("completed"));
+        assert_eq!(build["aggregatedOutput"], json!("Bundled successfully\n"));
+
+        let _ = std::fs::remove_file(session_path);
+    }
+
+    #[test]
+    fn enrich_thread_response_replay_restores_missing_final_agent_message() {
+        let session_path = write_temp_session_file(&[
+            json!({
+                "timestamp": "2026-04-28T23:37:13.079Z",
+                "type": "response_item",
+                "turn_id": "turn-final",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "figure it out" }]
+                }
+            })
+            .to_string(),
+            json!({
+                "timestamp": "2026-04-28T23:37:13.080Z",
+                "type": "response_item",
+                "turn_id": "turn-final",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "I’m checking the logs." }]
+                }
+            })
+            .to_string(),
+            json!({
+                "timestamp": "2026-04-28T23:37:13.081Z",
+                "type": "response_item",
+                "turn_id": "turn-final",
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "arguments": "{\"cmd\":\"rg missing src\",\"workdir\":\"/tmp/repo\"}",
+                    "call_id": "call-investigate"
+                }
+            })
+            .to_string(),
+            json!({
+                "timestamp": "2026-04-28T23:37:13.082Z",
+                "type": "response_item",
+                "turn_id": "turn-final",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call-investigate",
+                    "output": "Chunk ID: 1\nWall time: 0.0000 seconds\nProcess exited with code 0\nOriginal token count: 1\nOutput:\nsrc/foo.ts:1:missing\n"
+                }
+            })
+            .to_string(),
+            json!({
+                "timestamp": "2026-04-28T23:37:13.083Z",
+                "type": "response_item",
+                "turn_id": "turn-final",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "Final answer visible." }],
+                    "phase": "final_answer"
+                }
+            })
+            .to_string(),
+        ]);
+
+        let mut response = json!({
+            "result": {
+                "thread": {
+                    "id": "thread-final",
+                    "path": session_path,
+                    "turns": [
+                        {
+                            "id": "turn-final",
+                            "items": [
+                                {
+                                    "type": "userMessage",
+                                    "id": "item-user",
+                                    "content": [{ "type": "text", "text": "figure it out" }]
+                                },
+                                {
+                                    "type": "agentMessage",
+                                    "id": "item-agent-1",
+                                    "text": "I’m checking the logs."
+                                },
+                                {
+                                    "type": "commandExecution",
+                                    "id": "call-investigate",
+                                    "command": "rg missing src",
+                                    "cwd": "/tmp/repo",
+                                    "status": "completed",
+                                    "aggregatedOutput": "src/foo.ts:1:missing\n"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        });
+
+        enrich_thread_response_replay(&mut response);
+
+        let items = response["result"]["thread"]["turns"][0]["items"]
+            .as_array()
+            .unwrap();
+        let final_message = items
+            .iter()
+            .find(|item| item["id"] == json!("replay-agent-message-4"))
+            .expect("replayed final assistant message");
+        assert_eq!(final_message["type"], json!("agentMessage"));
+        assert_eq!(final_message["text"], json!("Final answer visible."));
+        assert_eq!(final_message["phase"], json!("final_answer"));
+
+        let ordered_ids = items
+            .iter()
+            .filter_map(|item| item.get("id").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ordered_ids,
+            vec![
+                "item-user",
+                "item-agent-1",
+                "call-investigate",
+                "replay-agent-message-4",
+            ]
+        );
+
+        let _ = std::fs::remove_file(session_path);
+    }
+
+    #[test]
+    fn enrich_thread_response_replay_adds_phase_to_existing_final_agent_message() {
+        let session_path = write_temp_session_file(&[
+            json!({
+                "timestamp": "2026-04-29T17:40:01.000Z",
+                "type": "response_item",
+                "turn_id": "turn-final",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "continue" }]
+                }
+            })
+            .to_string(),
+            json!({
+                "timestamp": "2026-04-29T17:40:02.000Z",
+                "type": "response_item",
+                "turn_id": "turn-final",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "Done." }],
+                    "phase": "final_answer"
+                }
+            })
+            .to_string(),
+        ]);
+
+        let mut response = json!({
+            "result": {
+                "thread": {
+                    "id": "thread-final",
+                    "path": session_path,
+                    "turns": [
+                        {
+                            "id": "turn-final",
+                            "items": [
+                                {
+                                    "type": "userMessage",
+                                    "id": "item-user",
+                                    "content": [{ "type": "text", "text": "continue" }]
+                                },
+                                {
+                                    "type": "agentMessage",
+                                    "id": "item-agent-final",
+                                    "text": "Done."
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        });
+
+        enrich_thread_response_replay(&mut response);
+
+        let items = response["result"]["thread"]["turns"][0]["items"]
+            .as_array()
+            .unwrap();
+        let final_message = items
+            .iter()
+            .find(|item| item["id"] == json!("item-agent-final"))
+            .expect("existing final assistant message");
+        assert_eq!(final_message["phase"], json!("final_answer"));
+        assert_eq!(items.len(), 2);
+
+        let _ = std::fs::remove_file(session_path);
     }
 }

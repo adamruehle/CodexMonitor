@@ -65,6 +65,7 @@ type UseThreadActionsOptions = {
   ) => void;
   updateThreadParent: (parentId: string, childIds: string[]) => void;
   onSubagentThreadDetected: (workspaceId: string, threadId: string) => void;
+  markThreadSnapshotFresh: (workspaceId: string, threadId: string) => void;
   onThreadCodexMetadataDetected?: (
     workspaceId: string,
     threadId: string,
@@ -90,6 +91,7 @@ export function useThreadActions({
   applyCollabThreadLinksFromThread,
   updateThreadParent,
   onSubagentThreadDetected,
+  markThreadSnapshotFresh,
   onThreadCodexMetadataDetected,
 }: UseThreadActionsOptions) {
   const resumeInFlightByThreadRef = useRef<Record<string, number>>({});
@@ -170,6 +172,7 @@ export function useThreadActions({
             dispatch({ type: "setActiveThreadId", workspaceId, threadId });
           }
           loadedThreadsRef.current[threadId] = true;
+          markThreadSnapshotFresh(workspaceId, threadId);
           return threadId;
         }
         return null;
@@ -253,7 +256,6 @@ export function useThreadActions({
             thread,
             workspaceId,
             threadId,
-            replaceLocal: shouldReplace,
             localItems,
             localStatus: threadStatusByIdRef.current[threadId],
             localActiveTurnId: activeTurnIdByThreadRef.current[threadId] ?? null,
@@ -261,6 +263,7 @@ export function useThreadActions({
           });
           if (!hydrationPlan.shouldHydrate) {
             loadedThreadsRef.current[threadId] = true;
+            markThreadSnapshotFresh(workspaceId, threadId);
             return threadId;
           }
           if (hydrationPlan.keepLocalProcessing) {
@@ -315,6 +318,7 @@ export function useThreadActions({
           }
         }
         loadedThreadsRef.current[threadId] = true;
+        markThreadSnapshotFresh(workspaceId, threadId);
         return threadId;
       } catch (error) {
         onDebug?.({
@@ -346,6 +350,7 @@ export function useThreadActions({
       getCustomName,
       itemsByThread,
       loadedThreadsRef,
+      markThreadSnapshotFresh,
       onDebug,
       replaceOnResumeRef,
     ],

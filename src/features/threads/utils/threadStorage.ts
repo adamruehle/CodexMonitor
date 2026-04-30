@@ -1,16 +1,19 @@
-import type { AccessMode, ServiceTier } from "@/types";
+import type { AccessMode, ConversationItem, ServiceTier } from "@/types";
+import { repairMissingTimestamps, repairMissingTurnIds } from "@utils/threadItems";
 
 const STORAGE_KEY_THREAD_ACTIVITY = "codexmonitor.threadLastUserActivity";
 export const STORAGE_KEY_PINNED_THREADS = "codexmonitor.pinnedThreads";
 export const STORAGE_KEY_CUSTOM_NAMES = "codexmonitor.threadCustomNames";
 export const STORAGE_KEY_THREAD_CODEX_PARAMS = "codexmonitor.threadCodexParams";
 export const STORAGE_KEY_DETACHED_REVIEW_LINKS = "codexmonitor.detachedReviewLinks";
+export const STORAGE_KEY_THREAD_ITEMS = "codexmonitor.threadItems";
 export const MAX_PINS_SOFT_LIMIT = 5;
 
 export type ThreadActivityMap = Record<string, Record<string, number>>;
 export type PinnedThreadsMap = Record<string, number>;
 export type CustomNamesMap = Record<string, string>;
 type DetachedReviewLinksMap = Record<string, Record<string, string>>;
+export type ThreadItemsMap = Record<string, ConversationItem[]>;
 
 // Per-thread Codex parameter overrides. Keyed by `${workspaceId}:${threadId}`.
 // These are UI-level preferences (not server state) and are best-effort persisted.
@@ -207,6 +210,51 @@ export function saveDetachedReviewLinks(links: DetachedReviewLinksMap) {
       STORAGE_KEY_DETACHED_REVIEW_LINKS,
       JSON.stringify(links),
     );
+  } catch {
+    // Best-effort persistence; ignore write failures.
+  }
+}
+
+export function loadThreadItems(): ThreadItemsMap {
+  if (typeof window === "undefined") {
+    return {};
+  }
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY_THREAD_ITEMS);
+    if (!raw) {
+      return {};
+    }
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return {};
+    }
+    return Object.fromEntries(
+      Object.entries(parsed)
+        .filter(([, value]) => Array.isArray(value))
+        .map(([threadId, value]) => [
+          threadId,
+          repairMissingTimestamps(
+            repairMissingTurnIds(value as ConversationItem[]),
+          ),
+        ]),
+    ) as ThreadItemsMap;
+  } catch {
+    return {};
+  }
+}
+
+export function saveThreadItems(items: ThreadItemsMap) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  try {
+    const repaired = Object.fromEntries(
+      Object.entries(items).map(([threadId, threadItems]) => [
+        threadId,
+        repairMissingTimestamps(repairMissingTurnIds(threadItems)),
+      ]),
+    ) as ThreadItemsMap;
+    window.localStorage.setItem(STORAGE_KEY_THREAD_ITEMS, JSON.stringify(repaired));
   } catch {
     // Best-effort persistence; ignore write failures.
   }

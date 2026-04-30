@@ -12,6 +12,7 @@ import {
   isApprovalRequestMethod,
   isSupportedAppServerMethod,
 } from "../../../utils/appServerEvents";
+import { normalizeThreadTimestamp } from "../../../utils/threadItems.shared";
 import type { SupportedAppServerMethod } from "../../../utils/appServerEvents";
 
 type AgentDelta = {
@@ -19,6 +20,9 @@ type AgentDelta = {
   threadId: string;
   itemId: string;
   delta: string;
+  phase?: string | null;
+  turnId?: string | null;
+  timestampMs?: number | null;
 };
 
 type AgentCompleted = {
@@ -26,6 +30,9 @@ type AgentCompleted = {
   threadId: string;
   itemId: string;
   text: string;
+  phase?: string | null;
+  turnId?: string | null;
+  timestampMs?: number | null;
 };
 
 type HookEvent = {
@@ -140,6 +147,50 @@ export const METHODS_ROUTED_IN_USE_APP_SERVER_EVENTS = [
   "turn/started",
 ] as const satisfies readonly SupportedAppServerMethod[];
 
+function parseEventTurnId(value: unknown) {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+function parseEventTimestamp(value: unknown) {
+  const timestamp = normalizeThreadTimestamp(value);
+  return timestamp > 0 ? timestamp : null;
+}
+
+function parseEventPhase(value: unknown) {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+function mergeItemEventMetadata(
+  item: Record<string, unknown>,
+  params: Record<string, unknown>,
+) {
+  const turnId = parseEventTurnId(params.turnId ?? params.turn_id ?? null);
+  const timestampMs = parseEventTimestamp(
+    params.timestamp ??
+      params.timestampMs ??
+      params.timestamp_ms ??
+      params.createdAt ??
+      params.created_at,
+  );
+  const phase = parseEventPhase(params.phase ?? null);
+  if (!turnId && timestampMs === null && !phase) {
+    return item;
+  }
+  return {
+    ...item,
+    ...(turnId && item.turnId === undefined && item.turn_id === undefined
+      ? { turnId }
+      : {}),
+    ...(timestampMs !== null &&
+    item.timestamp === undefined &&
+    item.timestampMs === undefined &&
+    item.timestamp_ms === undefined
+      ? { timestampMs }
+      : {}),
+    ...(phase && item.phase === undefined ? { phase } : {}),
+  };
+}
+
 function parseHookEvent(
   workspaceId: string,
   params: Record<string, unknown>,
@@ -252,12 +303,31 @@ export function useAppServerEvents(handlers: AppServerEventHandlers) {
         const itemId = String(params.itemId ?? params.item_id ?? "");
         const delta = String(params.delta ?? "");
         if (threadId && itemId && delta) {
-          currentHandlers.onAgentMessageDelta?.({
+          const turnId = parseEventTurnId(params.turnId ?? params.turn_id ?? null);
+          const timestampMs = parseEventTimestamp(
+            params.timestamp ??
+              params.timestampMs ??
+              params.timestamp_ms ??
+              params.createdAt ??
+              params.created_at,
+          );
+          const event: AgentDelta = {
             workspaceId: workspace_id,
             threadId,
             itemId,
             delta,
-          });
+          };
+          const phase = parseEventPhase(params.phase ?? null);
+          if (phase) {
+            event.phase = phase;
+          }
+          if (turnId) {
+            event.turnId = turnId;
+          }
+          if (timestampMs !== null) {
+            event.timestampMs = timestampMs;
+          }
+          currentHandlers.onAgentMessageDelta?.(event);
         }
         return;
       }
@@ -467,19 +537,47 @@ export function useAppServerEvents(handlers: AppServerEventHandlers) {
       if (method === "item/completed") {
         const threadId = String(params.threadId ?? params.thread_id ?? "");
         const item = params.item as Record<string, unknown> | undefined;
-        if (threadId && item) {
-          currentHandlers.onItemCompleted?.(workspace_id, threadId, item);
+        const itemWithMetadata = item ? mergeItemEventMetadata(item, params) : null;
+        if (threadId && itemWithMetadata) {
+          currentHandlers.onItemCompleted?.(workspace_id, threadId, itemWithMetadata);
         }
-        if (threadId && item?.type === "agentMessage") {
-          const itemId = String(item.id ?? "");
-          const text = String(item.text ?? "");
+        if (threadId && itemWithMetadata?.type === "agentMessage") {
+          const itemId = String(itemWithMetadata.id ?? "");
+          const text = String(itemWithMetadata.text ?? "");
           if (itemId) {
-            currentHandlers.onAgentMessageCompleted?.({
+            const turnId = parseEventTurnId(
+              itemWithMetadata.turnId ??
+                itemWithMetadata.turn_id ??
+                params.turnId ??
+                params.turn_id ??
+                null,
+            );
+            const timestampMs = parseEventTimestamp(
+              itemWithMetadata.timestamp ??
+                itemWithMetadata.timestampMs ??
+                itemWithMetadata.timestamp_ms ??
+                itemWithMetadata.createdAt ??
+                itemWithMetadata.created_at ??
+                itemWithMetadata.updatedAt ??
+                itemWithMetadata.updated_at,
+            );
+            const event: AgentCompleted = {
               workspaceId: workspace_id,
               threadId,
               itemId,
               text,
-            });
+            };
+            const phase = parseEventPhase(itemWithMetadata.phase ?? params.phase ?? null);
+            if (phase) {
+              event.phase = phase;
+            }
+            if (turnId) {
+              event.turnId = turnId;
+            }
+            if (timestampMs !== null) {
+              event.timestampMs = timestampMs;
+            }
+            currentHandlers.onAgentMessageCompleted?.(event);
           }
         }
         return;
@@ -489,7 +587,11 @@ export function useAppServerEvents(handlers: AppServerEventHandlers) {
         const threadId = String(params.threadId ?? params.thread_id ?? "");
         const item = params.item as Record<string, unknown> | undefined;
         if (threadId && item) {
-          currentHandlers.onItemStarted?.(workspace_id, threadId, item);
+          currentHandlers.onItemStarted?.(
+            workspace_id,
+            threadId,
+            mergeItemEventMetadata(item, params),
+          );
         }
         return;
       }

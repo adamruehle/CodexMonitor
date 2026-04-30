@@ -2,6 +2,7 @@ import type { CSSProperties } from "react";
 import { BrainCog, SlidersHorizontal, Zap } from "lucide-react";
 import type { AccessMode, ServiceTier, ThreadTokenUsage } from "../../../types";
 import type { CodexArgsOption } from "../../threads/utils/codexArgsProfiles";
+import type { MessageGroupControlsApi } from "../../messages/components/messageGroupControls";
 
 type ComposerMetaBarProps = {
   disabled: boolean;
@@ -22,6 +23,7 @@ type ComposerMetaBarProps = {
   selectedCodexArgsOverride?: string | null;
   onSelectCodexArgsOverride?: (value: string | null) => void;
   contextUsage?: ThreadTokenUsage | null;
+  messageGroupControls?: MessageGroupControlsApi | null;
 };
 
 export function ComposerMetaBar({
@@ -43,6 +45,7 @@ export function ComposerMetaBar({
   selectedCodexArgsOverride = null,
   onSelectCodexArgsOverride,
   contextUsage = null,
+  messageGroupControls = null,
 }: ComposerMetaBarProps) {
   const selectedModel =
     models.find((model) => model.id === selectedModelId) ?? null;
@@ -272,26 +275,48 @@ export function ComposerMetaBar({
           </select>
         </div>
       </div>
-      <div className="composer-context">
-        <div
-          className="composer-context-ring"
-          data-tooltip={
-            contextFreePercent === null
-              ? "Context free --"
-              : `Context free ${Math.round(contextFreePercent)}%`
-          }
-          aria-label={
-            contextFreePercent === null
-              ? "Context free --"
-              : `Context free ${Math.round(contextFreePercent)}%`
-          }
-          style={
-            {
-              "--context-free": contextFreePercent ?? 0,
-            } as CSSProperties
-          }
-        >
-          <span className="composer-context-value">●</span>
+      <div className="composer-context-cluster">
+        {messageGroupControls?.hasAnyGroups ? (
+          <div className="composer-group-controls" aria-label="Group display controls">
+            <button
+              type="button"
+              className="messages-group-control composer-group-control"
+              onClick={messageGroupControls.expandAll}
+              disabled={!messageGroupControls.canExpandAny}
+            >
+              Expand all
+            </button>
+            <button
+              type="button"
+              className="messages-group-control composer-group-control"
+              onClick={messageGroupControls.collapseAll}
+              disabled={!messageGroupControls.canCollapseAny}
+            >
+              Collapse all
+            </button>
+          </div>
+        ) : null}
+        <div className="composer-context">
+          <div
+            className="composer-context-ring"
+            data-tooltip={
+              contextFreePercent === null
+                ? "Context free --"
+                : `Context free ${Math.round(contextFreePercent)}%`
+            }
+            aria-label={
+              contextFreePercent === null
+                ? "Context free --"
+                : `Context free ${Math.round(contextFreePercent)}%`
+            }
+            style={
+              {
+                "--context-free": contextFreePercent ?? 0,
+              } as CSSProperties
+            }
+          >
+            <span className="composer-context-value">●</span>
+          </div>
         </div>
       </div>
     </div>

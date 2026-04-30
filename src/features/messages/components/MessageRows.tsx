@@ -16,7 +16,7 @@ import Wrench from "lucide-react/dist/esm/icons/wrench";
 import X from "lucide-react/dist/esm/icons/x";
 import { exportMarkdownFile } from "@services/tauri";
 import { pushErrorToast } from "@services/toasts";
-import type { ConversationItem } from "../../../types";
+import type { ConversationItem, TurnPlan } from "../../../types";
 import type { ParsedFileLocation } from "../../../utils/fileLinks";
 import { PierreDiffBlock } from "../../git/components/PierreDiffBlock";
 import {
@@ -93,6 +93,11 @@ type ToolRowProps = MarkdownFileLinkProps & {
 
 type ExploreRowProps = {
   item: Extract<ConversationItem, { kind: "explore" }>;
+};
+
+type PlanRowProps = {
+  plan: TurnPlan;
+  isActive: boolean;
 };
 
 type CommandOutputProps = {
@@ -296,6 +301,25 @@ function buildPlanExportFileName(itemId: string) {
     return "plan.md";
   }
   return normalized.startsWith("plan-") ? `${normalized}.md` : `plan-${normalized}.md`;
+}
+
+function formatPlanProgress(plan: TurnPlan) {
+  const total = plan.steps.length;
+  if (!total) {
+    return "";
+  }
+  const completed = plan.steps.filter((step) => step.status === "completed").length;
+  return `${completed}/${total}`;
+}
+
+function planStepMarker(status: TurnPlan["steps"][number]["status"]) {
+  if (status === "completed") {
+    return "[x]";
+  }
+  if (status === "inProgress") {
+    return "[>]";
+  }
+  return "[ ]";
 }
 
 export const WorkingIndicator = memo(function WorkingIndicator({
@@ -679,6 +703,39 @@ export const UserInputRow = memo(function UserInputRow({
           </div>
         )}
       </div>
+    </div>
+  );
+});
+
+export const PlanRow = memo(function PlanRow({ plan, isActive }: PlanRowProps) {
+  const progress = formatPlanProgress(plan);
+  return (
+    <div
+      className={`plan-inline${isActive ? " plan-inline-active" : ""}`}
+      aria-live="polite"
+    >
+      <div className="plan-inline-header">
+        <span className="plan-inline-title">Update plan</span>
+        {progress && <span className="plan-inline-progress">{progress}</span>}
+      </div>
+      {plan.explanation && (
+        <div className="plan-inline-explanation">{plan.explanation}</div>
+      )}
+      {plan.steps.length > 0 && (
+        <ol className="plan-inline-list">
+          {plan.steps.map((step, index) => (
+            <li
+              key={`${plan.turnId}-${index}-${step.step}`}
+              className={`plan-inline-step ${step.status}`}
+            >
+              <span className="plan-inline-step-status" aria-hidden>
+                {planStepMarker(step.status)}
+              </span>
+              <span className="plan-inline-step-text">{step.step}</span>
+            </li>
+          ))}
+        </ol>
+      )}
     </div>
   );
 });

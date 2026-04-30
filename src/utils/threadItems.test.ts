@@ -3,11 +3,13 @@ import type { ConversationItem } from "../types";
 import {
   buildConversationItem,
   buildConversationItemFromThreadItem,
+  buildItemsFromThread,
   getThreadCreatedTimestamp,
   getThreadTimestamp,
   mergeThreadItems,
   normalizeItem,
   prepareThreadItems,
+  repairMissingTurnIds,
   upsertItem,
 } from "./threadItems";
 
@@ -64,6 +66,202 @@ describe("threadItems", () => {
     expect(firstOutput).not.toBe(output);
     expect(firstOutput?.endsWith("...")).toBe(true);
     expect(secondOutput).toBe(output);
+  });
+
+  it("preserves an existing turn id when a later sparse tool update omits it", () => {
+    const existing: ConversationItem = {
+      id: "tool-1",
+      kind: "tool",
+      toolType: "commandExecution",
+      title: "Command: date",
+      detail: "/tmp",
+      status: "inProgress",
+      output: "",
+      turnId: "turn-1",
+      timestampMs: 1_000,
+    };
+    const incoming: ConversationItem = {
+      id: "tool-1",
+      kind: "tool",
+      toolType: "commandExecution",
+      title: "Command: date",
+      detail: "/tmp",
+      status: "completed",
+      output: "Tue Apr 28 23:42:04 PDT 2026",
+      turnId: null,
+      timestampMs: null,
+    };
+
+    const merged = upsertItem([existing], incoming);
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toMatchObject({
+      id: "tool-1",
+      turnId: "turn-1",
+      timestampMs: 1_000,
+      status: "completed",
+      output: "Tue Apr 28 23:42:04 PDT 2026",
+    });
+  });
+
+  it("converts generic thread message items with assistant output_text content", () => {
+    const converted = buildConversationItemFromThreadItem({
+      id: "assistant-generic-1",
+      type: "message",
+      role: "assistant",
+      content: [{ type: "output_text", text: "Final answer visible." }],
+      timestampMs: 1_746_000_000_000,
+    });
+
+    expect(converted).toMatchObject({
+      id: "assistant-generic-1",
+      kind: "message",
+      role: "assistant",
+      text: "Final answer visible.",
+    });
+  });
+
+  it("builds thread items from generic message turn payloads", () => {
+    const items = buildItemsFromThread({
+      turns: [
+        {
+          id: "turn-1",
+          started_at: "2026-04-29T01:00:00Z",
+          completed_at: "2026-04-29T01:00:10Z",
+          items: [
+            {
+              id: "user-1",
+              type: "message",
+              role: "user",
+              content: [{ type: "input_text", text: "continue" }],
+            },
+            {
+              id: "assistant-1",
+              type: "message",
+              role: "assistant",
+              content: [{ type: "output_text", text: "Final answer visible." }],
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(items).toHaveLength(2);
+    expect(items[0]).toMatchObject({
+      id: "user-1",
+      kind: "message",
+      role: "user",
+      text: "continue",
+    });
+    expect(items[1]).toMatchObject({
+      id: "assistant-1",
+      kind: "message",
+      role: "assistant",
+      text: "Final answer visible.",
+    });
+  });
+
+  it("repairs missing turn ids for persisted work items inside a mixed transcript", () => {
+    const items: ConversationItem[] = [
+      {
+        id: "user-1",
+        kind: "message",
+        role: "user",
+        text: "Investigate this",
+        turnId: "turn-1",
+      },
+      {
+        id: "assistant-1",
+        kind: "message",
+        role: "assistant",
+        text: "I’m checking now.",
+        turnId: "turn-1",
+      },
+      {
+        id: "tool-1",
+        kind: "tool",
+        toolType: "commandExecution",
+        title: "Command: rg issue src",
+        detail: "/tmp/repo",
+        status: "completed",
+        output: "src/foo.ts:1:issue",
+        turnId: null,
+      },
+      {
+        id: "assistant-2",
+        kind: "message",
+        role: "assistant",
+        text: "Found it.",
+        turnId: "turn-1",
+      },
+    ];
+
+    const repaired = repairMissingTurnIds(items);
+
+    expect(repaired).toHaveLength(4);
+    expect(repaired[2]).toMatchObject({
+      id: "tool-1",
+      turnId: "turn-1",
+    });
+  });
+
+  it("synthesizes turn ids for legacy transcripts that never stored them", () => {
+    const items: ConversationItem[] = [
+      {
+        id: "user-1",
+        kind: "message",
+        role: "user",
+        text: "continue",
+        turnId: null,
+      },
+      {
+        id: "assistant-1",
+        kind: "message",
+        role: "assistant",
+        text: "Checking the resume path.",
+        turnId: null,
+      },
+      {
+        id: "tool-1",
+        kind: "tool",
+        toolType: "commandExecution",
+        title: "Command: rg resume src",
+        detail: "/tmp/repo",
+        status: "completed",
+        output: "matched",
+        turnId: null,
+      },
+      {
+        id: "assistant-2",
+        kind: "message",
+        role: "assistant",
+        text: "Found the likely merge issue.",
+        turnId: null,
+      },
+      {
+        id: "user-2",
+        kind: "message",
+        role: "user",
+        text: "please fix it",
+        turnId: null,
+      },
+      {
+        id: "assistant-3",
+        kind: "message",
+        role: "assistant",
+        text: "Patching it now.",
+        turnId: null,
+      },
+    ];
+
+    const repaired = repairMissingTurnIds(items);
+    const firstTurnId = repaired[0]?.turnId;
+    const secondTurnId = repaired[4]?.turnId;
+
+    expect(firstTurnId).toBeTruthy();
+    expect(repaired.slice(0, 4).every((item) => item.turnId === firstTurnId)).toBe(true);
+    expect(secondTurnId).toBeTruthy();
+    expect(repaired.slice(4).every((item) => item.turnId === secondTurnId)).toBe(true);
+    expect(secondTurnId).not.toBe(firstTurnId);
   });
 
   it("respects custom max items per thread in prepareThreadItems", () => {
@@ -148,6 +346,34 @@ describe("threadItems", () => {
       expect(prepared[0].entries[1].label).toContain("bar.ts");
     }
     expect(prepared.filter((item) => item.kind === "tool")).toHaveLength(0);
+  });
+
+  it("keeps raw command rows when exploration summarization is disabled", () => {
+    const items: ConversationItem[] = [
+      {
+        id: "cmd-1",
+        kind: "tool",
+        toolType: "commandExecution",
+        title: "Command: cat src/foo.ts",
+        detail: "",
+        status: "completed",
+        output: "export const foo = 1;",
+      },
+      {
+        id: "cmd-2",
+        kind: "tool",
+        toolType: "commandExecution",
+        title: "Command: rg foo src",
+        detail: "",
+        status: "completed",
+        output: "src/foo.ts:1:export const foo = 1;",
+      },
+    ];
+
+    const prepared = prepareThreadItems(items, { summarizeExploration: false });
+    expect(prepared).toHaveLength(2);
+    expect(prepared[0].kind).toBe("tool");
+    expect(prepared[1].kind).toBe("tool");
   });
 
   it("treats inProgress command status as exploring", () => {
@@ -798,6 +1024,33 @@ describe("threadItems", () => {
     }
   });
 
+  it("preserves assistant message phase from thread history", () => {
+    const agentItem = buildConversationItemFromThreadItem({
+      type: "agentMessage",
+      id: "agent-final",
+      text: "Visible final answer.",
+      phase: "final_answer",
+    });
+    expect(agentItem).not.toBeNull();
+    if (agentItem && agentItem.kind === "message") {
+      expect(agentItem.role).toBe("assistant");
+      expect(agentItem.phase).toBe("final_answer");
+    }
+
+    const genericItem = buildConversationItemFromThreadItem({
+      type: "message",
+      id: "generic-final",
+      role: "assistant",
+      content: [{ type: "output_text", text: "Also final." }],
+      phase: "final_answer",
+    });
+    expect(genericItem).not.toBeNull();
+    if (genericItem && genericItem.kind === "message") {
+      expect(genericItem.role).toBe("assistant");
+      expect(genericItem.phase).toBe("final_answer");
+    }
+  });
+
   it("formats collab tool calls with receivers and agent states", () => {
     const item = buildConversationItem({
       type: "collabToolCall",
@@ -913,6 +1166,166 @@ describe("threadItems", () => {
   it("parses created timestamps", () => {
     const timestamp = getThreadCreatedTimestamp({ created_at: "2025-01-01T00:00:00Z" });
     expect(timestamp).toBe(Date.parse("2025-01-01T00:00:00Z"));
+  });
+
+  it("spreads rehydrated turn item timestamps across the turn lifetime", () => {
+    const items = buildItemsFromThread({
+      turns: [
+        {
+          id: "turn-1",
+          started_at: "2026-04-28T00:57:00Z",
+          completed_at: "2026-04-28T01:15:00Z",
+          items: [
+            {
+              id: "user-1",
+              type: "userMessage",
+              content: [{ type: "text", text: "continue" }],
+            },
+            {
+              id: "tool-1",
+              type: "commandExecution",
+              command: ["npm", "test"],
+            },
+            {
+              id: "assistant-1",
+              type: "agentMessage",
+              text: "Done",
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(items).toHaveLength(3);
+    expect(items[0]?.timestampMs).toBe(Date.parse("2026-04-28T00:57:00Z"));
+    expect(items[2]?.timestampMs).toBe(Date.parse("2026-04-28T01:15:00Z"));
+    expect((items[1]?.timestampMs ?? 0)).toBeGreaterThan(items[0]?.timestampMs ?? 0);
+    expect((items[1]?.timestampMs ?? 0)).toBeLessThan(items[2]?.timestampMs ?? 0);
+  });
+
+  it("inserts local-only replayed items by timestamp instead of appending them", () => {
+    const remoteItems: ConversationItem[] = [
+      {
+        id: "user-1",
+        kind: "message",
+        role: "user",
+        text: "debug this",
+        timestampMs: 1_000,
+      },
+      {
+        id: "assistant-1",
+        kind: "message",
+        role: "assistant",
+        text: "Final answer visible.",
+        timestampMs: 6_000,
+      },
+    ];
+    const localItems: ConversationItem[] = [
+      {
+        id: "tool-1",
+        kind: "tool",
+        toolType: "commandExecution",
+        title: "Command: rg foo src",
+        detail: "/tmp/repo",
+        status: "completed",
+        output: "src/foo.ts:1:foo",
+        timestampMs: 3_000,
+      },
+    ];
+
+    const merged = mergeThreadItems(remoteItems, localItems);
+
+    expect(merged.map((item) => item.id)).toEqual([
+      "user-1",
+      "tool-1",
+      "assistant-1",
+    ]);
+  });
+
+  it("inserts local-only turn items before the final assistant reply when timestamps are missing", () => {
+    const remoteItems: ConversationItem[] = [
+      {
+        id: "user-1",
+        kind: "message",
+        role: "user",
+        text: "continue",
+        turnId: "turn-1",
+        timestampMs: 1_746_000_000_000,
+      },
+      {
+        id: "assistant-progress-1",
+        kind: "message",
+        role: "assistant",
+        text: "Checking the replay path.",
+        turnId: "turn-1",
+        timestampMs: 1_746_000_001_000,
+      },
+      {
+        id: "assistant-final-1",
+        kind: "message",
+        role: "assistant",
+        text: "Final answer visible.",
+        turnId: "turn-1",
+        timestampMs: 1_746_000_010_000,
+      },
+    ];
+    const localItems: ConversationItem[] = [
+      {
+        id: "tool-1",
+        kind: "tool",
+        toolType: "commandExecution",
+        title: "Command: rg missing src",
+        detail: "/tmp/repo",
+        status: "completed",
+        output: "src/foo.ts:1:missing",
+        turnId: "turn-1",
+        timestampMs: null,
+      },
+    ];
+
+    const merged = mergeThreadItems(remoteItems, localItems);
+
+    expect(merged.map((item) => item.id)).toEqual([
+      "user-1",
+      "assistant-progress-1",
+      "tool-1",
+      "assistant-final-1",
+    ]);
+  });
+
+  it("preserves remote turn metadata when richer local assistant text wins", () => {
+    const remoteItems: ConversationItem[] = [
+      {
+        id: "assistant-1",
+        kind: "message",
+        role: "assistant",
+        text: "Done.",
+        turnId: "turn-1",
+        timestampMs: 10_000,
+      },
+    ];
+    const localItems: ConversationItem[] = [
+      {
+        id: "assistant-1",
+        kind: "message",
+        role: "assistant",
+        text: "Done. I also fixed the merge path.",
+        turnId: null,
+        timestampMs: null,
+      },
+    ];
+
+    const merged = mergeThreadItems(remoteItems, localItems);
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toMatchObject({
+      id: "assistant-1",
+      kind: "message",
+      role: "assistant",
+      text: "Done. I also fixed the merge path.",
+      turnId: "turn-1",
+      timestampMs: 10_000,
+    });
   });
 
 });

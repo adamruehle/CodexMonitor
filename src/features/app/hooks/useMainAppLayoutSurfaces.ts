@@ -1,5 +1,6 @@
 import type { RefObject } from "react";
 import type { AppSettings, ComposerEditorSettings, WorkspaceInfo } from "@/types";
+import type { MessageGroupControlsApi } from "@/features/messages/components/messageGroupControls";
 import type { ThreadState } from "@/features/threads/hooks/useThreadsReducer";
 import type { WorkspaceLaunchScriptsState } from "@app/hooks/useWorkspaceLaunchScripts";
 import { REMOTE_THREAD_POLL_INTERVAL_MS } from "@app/hooks/useRemoteThreadRefreshOnFocus";
@@ -70,6 +71,8 @@ type UseMainAppLayoutSurfacesArgs = {
   onPlanSubmitChanges: LayoutNodesOptions["primary"]["messagesProps"]["onPlanSubmitChanges"];
   activePlan: LayoutNodesOptions["secondary"]["planPanelProps"]["plan"];
   activeTokenUsage: ComposerProps["contextUsage"];
+  messageGroupControls: MessageGroupControlsApi | null;
+  onMessageGroupControlsChange: LayoutNodesOptions["primary"]["messagesProps"]["onGroupControlsChange"];
   latestAgentRuns: LayoutNodesOptions["primary"]["homeProps"]["latestAgentRuns"];
   isLoadingLatestAgents: LayoutNodesOptions["primary"]["homeProps"]["isLoadingLatestAgents"];
   localUsageSnapshot: LayoutNodesOptions["primary"]["homeProps"]["localUsageSnapshot"];
@@ -271,7 +274,10 @@ function buildPrimarySurface({
   onUserInputSubmit,
   onPlanAccept,
   onPlanSubmitChanges,
+  activePlan,
   activeTokenUsage,
+  messageGroupControls,
+  onMessageGroupControlsChange,
   latestAgentRuns,
   isLoadingLatestAgents,
   localUsageSnapshot,
@@ -438,6 +444,7 @@ function buildPrimarySurface({
     },
     messagesProps: {
       items: activeItems,
+      activePlan,
       threadId: activeThreadId ?? null,
       workspaceId: activeWorkspace?.id ?? null,
       workspacePath: activeWorkspace?.path ?? null,
@@ -453,6 +460,7 @@ function buildPrimarySurface({
       onQuoteMessage: composerWorkspaceState.canInsertComposerText
         ? composerWorkspaceState.handleInsertComposerText
         : undefined,
+      onGroupControlsChange: onMessageGroupControlsChange,
       isThinking: composerWorkspaceState.isProcessing,
       isLoadingMessages: activeThreadId
         ? threadResumeLoadingById[activeThreadId] ?? false
@@ -517,6 +525,7 @@ function buildPrimarySurface({
           onSelectCodexArgsOverride,
           accessMode,
           onSelectAccessMode,
+          messageGroupControls,
           skills,
           appsEnabled: appSettings.experimentalAppsEnabled,
           apps,
@@ -980,6 +989,8 @@ export function useMainAppLayoutSurfaces({
   onPlanSubmitChanges,
   activePlan,
   activeTokenUsage,
+  messageGroupControls,
+  onMessageGroupControlsChange,
   latestAgentRuns,
   isLoadingLatestAgents,
   localUsageSnapshot,
@@ -1142,6 +1153,8 @@ export function useMainAppLayoutSurfaces({
     onPlanSubmitChanges,
     activePlan,
     activeTokenUsage,
+    messageGroupControls,
+    onMessageGroupControlsChange,
     latestAgentRuns,
     isLoadingLatestAgents,
     localUsageSnapshot,

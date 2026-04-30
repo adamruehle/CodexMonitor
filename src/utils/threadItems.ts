@@ -7,5 +7,7 @@ export {
   getThreadTimestamp,
   mergeThreadItems,
   previewThreadName,
+  repairMissingTurnIds,
+  repairMissingTimestamps,
   upsertItem,
 } from "./threadItems.listOps";

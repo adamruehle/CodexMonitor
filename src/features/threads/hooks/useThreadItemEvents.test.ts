@@ -12,6 +12,11 @@ type ItemPayload = Record<string, unknown>;
 
 type SetupOverrides = {
   activeThreadId?: string | null;
+  getActiveTurnId?: (threadId: string) => string | null;
+  shouldMarkProcessingForTurn?: (
+    threadId: string,
+    turnId: string | null,
+  ) => boolean;
   getCustomName?: (workspaceId: string, threadId: string) => string | undefined;
   onUserMessageCreated?: (workspaceId: string, threadId: string, text: string) => void;
   onReviewExited?: (workspaceId: string, threadId: string) => void;
@@ -24,6 +29,8 @@ const makeOptions = (overrides: SetupOverrides = {}) => {
   const safeMessageActivity = vi.fn();
   const recordThreadActivity = vi.fn();
   const applyCollabThreadLinks = vi.fn();
+  const getActiveTurnId =
+    overrides.getActiveTurnId ?? vi.fn(() => null);
   const getCustomName =
     overrides.getCustomName ?? vi.fn(() => undefined);
 
@@ -31,6 +38,8 @@ const makeOptions = (overrides: SetupOverrides = {}) => {
     useThreadItemEvents({
       activeThreadId: overrides.activeThreadId ?? null,
       dispatch,
+      getActiveTurnId,
+      shouldMarkProcessingForTurn: overrides.shouldMarkProcessingForTurn,
       getCustomName,
       markProcessing,
       markReviewing,
@@ -50,6 +59,7 @@ const makeOptions = (overrides: SetupOverrides = {}) => {
     safeMessageActivity,
     recordThreadActivity,
     applyCollabThreadLinks,
+    getActiveTurnId,
     getCustomName,
   };
 };
@@ -93,6 +103,33 @@ describe("useThreadItemEvents", () => {
       hasCustomName: true,
     });
     expect(safeMessageActivity).toHaveBeenCalled();
+  });
+
+  it("falls back to the thread active turn id when an item event omits turnId", () => {
+    const getActiveTurnId = vi.fn((threadId: string) =>
+      threadId === "thread-1" ? "turn-1" : null,
+    );
+    const { result } = makeOptions({ getActiveTurnId });
+    const item: ItemPayload = {
+      type: "commandExecution",
+      id: "cmd-1",
+      command: ["date"],
+    };
+
+    act(() => {
+      result.current.onItemCompleted("ws-1", "thread-1", item);
+    });
+
+    expect(buildConversationItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "commandExecution",
+        id: "cmd-1",
+      }),
+      expect.objectContaining({
+        turnId: "turn-1",
+        timestampMs: expect.any(Number),
+      }),
+    );
   });
 
   it("marks review/processing false when review mode exits", () => {
@@ -150,6 +187,10 @@ describe("useThreadItemEvents", () => {
         id: "compact-1",
         status: "inProgress",
       }),
+      expect.objectContaining({
+        turnId: null,
+        timestampMs: expect.any(Number),
+      }),
     );
 
     act(() => {
@@ -160,6 +201,10 @@ describe("useThreadItemEvents", () => {
         type: "contextCompaction",
         id: "compact-1",
         status: "completed",
+      }),
+      expect.objectContaining({
+        turnId: null,
+        timestampMs: expect.any(Number),
       }),
     );
   });
@@ -177,6 +222,10 @@ describe("useThreadItemEvents", () => {
         id: "search-1",
         status: "inProgress",
       }),
+      expect.objectContaining({
+        turnId: null,
+        timestampMs: expect.any(Number),
+      }),
     );
 
     act(() => {
@@ -187,6 +236,10 @@ describe("useThreadItemEvents", () => {
         type: "webSearch",
         id: "search-1",
         status: "completed",
+      }),
+      expect.objectContaining({
+        turnId: null,
+        timestampMs: expect.any(Number),
       }),
     );
   });
@@ -238,7 +291,84 @@ describe("useThreadItemEvents", () => {
       itemId: "assistant-1",
       delta: "Hello",
       hasCustomName: false,
+      timestampMs: expect.any(Number),
     });
+  });
+
+  it("uses the active turn id for agent deltas that omit turnId", () => {
+    const getActiveTurnId = vi.fn(() => "turn-active");
+    const { result, dispatch } = makeOptions({ getActiveTurnId });
+
+    act(() => {
+      result.current.onAgentMessageDelta({
+        workspaceId: "ws-1",
+        threadId: "thread-1",
+        itemId: "assistant-1",
+        delta: "Live assistant text",
+        phase: "commentary",
+      });
+    });
+
+    expect(dispatch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "appendAgentDelta",
+        threadId: "thread-1",
+        itemId: "assistant-1",
+        turnId: "turn-active",
+        phase: "commentary",
+      }),
+    );
+  });
+
+  it("does not reopen processing for late deltas from a settled turn", () => {
+    const shouldMarkProcessingForTurn = vi.fn(() => false);
+    const { result, dispatch, markProcessing } = makeOptions({
+      shouldMarkProcessingForTurn,
+    });
+
+    act(() => {
+      result.current.onAgentMessageDelta({
+        workspaceId: "ws-1",
+        threadId: "thread-1",
+        itemId: "assistant-1",
+        delta: "Late text",
+        turnId: "turn-1",
+      });
+    });
+
+    expect(shouldMarkProcessingForTurn).toHaveBeenCalledWith(
+      "thread-1",
+      "turn-1",
+    );
+    expect(markProcessing).not.toHaveBeenCalled();
+    expect(dispatch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "appendAgentDelta",
+        threadId: "thread-1",
+        turnId: "turn-1",
+      }),
+    );
+  });
+
+  it("does not reopen processing for late item starts from a settled turn", () => {
+    const shouldMarkProcessingForTurn = vi.fn(() => false);
+    const { result, markProcessing } = makeOptions({
+      shouldMarkProcessingForTurn,
+    });
+
+    act(() => {
+      result.current.onItemStarted("ws-1", "thread-1", {
+        type: "contextCompaction",
+        id: "compact-1",
+        turnId: "turn-1",
+      });
+    });
+
+    expect(shouldMarkProcessingForTurn).toHaveBeenCalledWith(
+      "thread-1",
+      "turn-1",
+    );
+    expect(markProcessing).not.toHaveBeenCalled();
   });
 
   it("completes agent messages and updates thread activity", () => {
@@ -268,6 +398,7 @@ describe("useThreadItemEvents", () => {
       itemId: "assistant-1",
       text: "Done",
       hasCustomName: false,
+      timestampMs: 1234,
     });
     expect(dispatch).toHaveBeenCalledWith({
       type: "setThreadTimestamp",
@@ -288,6 +419,36 @@ describe("useThreadItemEvents", () => {
       threadId: "thread-1",
       hasUnread: true,
     });
+
+    nowSpy.mockRestore();
+  });
+
+  it("uses the active turn id for completed agent messages that omit turnId", () => {
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(5678);
+    const getActiveTurnId = vi.fn(() => "turn-active");
+    const { result, dispatch } = makeOptions({ getActiveTurnId });
+
+    act(() => {
+      result.current.onAgentMessageCompleted({
+        workspaceId: "ws-1",
+        threadId: "thread-1",
+        itemId: "assistant-1",
+        text: "Final answer",
+        phase: "final_answer",
+      });
+    });
+
+    expect(dispatch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "completeAgentMessage",
+        threadId: "thread-1",
+        itemId: "assistant-1",
+        text: "Final answer",
+        phase: "final_answer",
+        turnId: "turn-active",
+        timestampMs: 5678,
+      }),
+    );
 
     nowSpy.mockRestore();
   });

@@ -410,7 +410,10 @@ export function prepareThreadItems(
       : normalized.length > maxItemsPerThread
         ? normalized.slice(-maxItemsPerThread)
         : normalized;
-  const summarized = summarizeExploration(limited);
+  const summarized =
+    options?.summarizeExploration === false
+      ? limited
+      : summarizeExploration(limited);
   const cutoff = Math.max(0, summarized.length - TOOL_OUTPUT_RECENT_ITEMS);
   return summarized.map((item, index) => {
     if (index >= cutoff || item.kind !== "tool") {

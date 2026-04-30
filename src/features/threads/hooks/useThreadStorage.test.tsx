@@ -40,6 +40,7 @@ describe("useThreadStorage", () => {
     vi
       .mocked(loadCustomNames)
       .mockReturnValueOnce({ "ws-1:thread-1": "Custom" })
+      .mockReturnValueOnce({ "ws-1:thread-1": "Custom" })
       .mockReturnValueOnce({ "ws-1:thread-1": "Updated" });
 
     const { result } = renderHook(() => useThreadStorage());
@@ -51,9 +52,7 @@ describe("useThreadStorage", () => {
       "ws-1:thread-1": 202,
     });
 
-    await waitFor(() => {
-      expect(result.current.getCustomName("ws-1", "thread-1")).toBe("Custom");
-    });
+    expect(result.current.getCustomName("ws-1", "thread-1")).toBe("Custom");
 
     act(() => {
       window.dispatchEvent(
