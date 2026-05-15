@@ -37,6 +37,8 @@ vi.mock("@utils/threadItems", () => ({
   isReviewingFromThread: vi.fn(),
   mergeThreadItems: vi.fn(),
   previewThreadName: vi.fn(),
+  repairMissingTimestamps: vi.fn((items) => items),
+  repairMissingTurnIds: vi.fn((items) => items),
 }));
 
 vi.mock("@threads/utils/threadStorage", () => ({
@@ -274,7 +276,12 @@ describe("useThreadActions", () => {
 
     vi.mocked(resumeThread).mockResolvedValue({
       result: {
-        thread: { id: "thread-2", preview: "preview", updated_at: 555 },
+        thread: {
+          id: "thread-2",
+          preview: "preview",
+          updated_at: 555,
+          turns: [{ id: "turn-1", status: "inProgress", items: [] }],
+        },
       },
     });
     vi.mocked(buildItemsFromThread).mockReturnValue([assistantItem]);
@@ -800,6 +807,7 @@ describe("useThreadActions", () => {
           name: "Custom",
           updatedAt: 5000,
           createdAt: 0,
+          provider: "codex",
         },
       ],
     });
@@ -904,6 +912,7 @@ describe("useThreadActions", () => {
           name: "WS1 thread",
           updatedAt: 5000,
           createdAt: 0,
+          provider: "codex",
         },
       ],
     });
@@ -918,6 +927,7 @@ describe("useThreadActions", () => {
           name: "WS2 thread",
           updatedAt: 4500,
           createdAt: 0,
+          provider: "codex",
         },
       ],
     });
@@ -962,6 +972,7 @@ describe("useThreadActions", () => {
           name: "Shared root thread",
           updatedAt: 5000,
           createdAt: 0,
+          provider: "codex",
         },
       ],
     });
@@ -1237,6 +1248,7 @@ describe("useThreadActions", () => {
           name: "Review helper",
           updatedAt: 4500,
           createdAt: 0,
+          provider: "codex",
           isSubagent: true,
           subagentNickname: "Atlas",
           subagentRole: "reviewer",
@@ -1330,6 +1342,7 @@ describe("useThreadActions", () => {
           name: "Windows thread",
           updatedAt: 5000,
           createdAt: 0,
+          provider: "codex",
         },
       ],
     });
@@ -1372,6 +1385,7 @@ describe("useThreadActions", () => {
           name: "Windows namespace thread",
           updatedAt: 5000,
           createdAt: 0,
+          provider: "codex",
         },
       ],
     });
@@ -1410,6 +1424,7 @@ describe("useThreadActions", () => {
           name: "Nested thread",
           updatedAt: 5000,
           createdAt: 0,
+          provider: "codex",
         },
       ],
     });
@@ -1548,7 +1563,13 @@ describe("useThreadActions", () => {
       sortKey: "updated_at",
       threads: [
         { id: "thread-1", name: "Agent 1", updatedAt: 6000 },
-        { id: "thread-2", name: "Older preview", updatedAt: 4000, createdAt: 0 },
+        {
+          id: "thread-2",
+          name: "Older preview",
+          updatedAt: 4000,
+          createdAt: 0,
+          provider: "codex",
+        },
       ],
     });
     expect(dispatch).toHaveBeenCalledWith({
@@ -1675,6 +1696,7 @@ describe("useThreadActions", () => {
           name: "Older windows preview",
           updatedAt: 4000,
           createdAt: 0,
+          provider: "codex",
         },
       ],
     });
@@ -1721,6 +1743,7 @@ describe("useThreadActions", () => {
           name: "Nested older preview",
           updatedAt: 4000,
           createdAt: 0,
+          provider: "codex",
         },
       ],
     });

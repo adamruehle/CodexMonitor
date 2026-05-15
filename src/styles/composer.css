@@ -140,6 +140,16 @@
   color: var(--text-strong);
 }
 
+.composer-send-error {
+  margin-bottom: 8px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 148, 148, 0.24);
+  background: rgba(255, 120, 120, 0.09);
+  color: rgba(255, 220, 220, 0.92);
+  font-size: 12px;
+}
+
 .composer-input {
   display: block;
 }

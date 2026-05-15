@@ -4,13 +4,34 @@ import { prefersUpdatedSort } from "./common";
 
 type ThreadStatus = ThreadState["threadStatusById"][string];
 
+function activeFlagsEqual(left: readonly string[] = [], right: readonly string[] = []) {
+  if (left.length !== right.length) {
+    return false;
+  }
+  return left.every((value, index) => value === right[index]);
+}
+
+function buildThreadStatus(
+  status: Partial<ThreadStatus> = {},
+): ThreadStatus {
+  return {
+    isProcessing: status.isProcessing ?? false,
+    hasUnread: status.hasUnread ?? false,
+    isReviewing: status.isReviewing ?? false,
+    processingStartedAt: status.processingStartedAt ?? null,
+    lastDurationMs: status.lastDurationMs ?? null,
+    activeFlags: status.activeFlags ?? [],
+  };
+}
+
 function statusEquals(previous: ThreadStatus, nextStatus: ThreadStatus) {
   return (
     previous.isProcessing === nextStatus.isProcessing &&
     previous.hasUnread === nextStatus.hasUnread &&
     previous.isReviewing === nextStatus.isReviewing &&
     previous.processingStartedAt === nextStatus.processingStartedAt &&
-    previous.lastDurationMs === nextStatus.lastDurationMs
+    previous.lastDurationMs === nextStatus.lastDurationMs &&
+    activeFlagsEqual(previous.activeFlags, nextStatus.activeFlags)
   );
 }
 
@@ -29,18 +50,10 @@ export function reduceThreadLifecycle(
         threadStatusById: action.threadId
           ? {
               ...state.threadStatusById,
-              [action.threadId]: {
-                isProcessing:
-                  state.threadStatusById[action.threadId]?.isProcessing ?? false,
+              [action.threadId]: buildThreadStatus({
+                ...state.threadStatusById[action.threadId],
                 hasUnread: false,
-                isReviewing:
-                  state.threadStatusById[action.threadId]?.isReviewing ?? false,
-                processingStartedAt:
-                  state.threadStatusById[action.threadId]?.processingStartedAt ??
-                  null,
-                lastDurationMs:
-                  state.threadStatusById[action.threadId]?.lastDurationMs ?? null,
-              },
+              }),
             }
           : state.threadStatusById,
       };
@@ -68,13 +81,7 @@ export function reduceThreadLifecycle(
         },
         threadStatusById: {
           ...state.threadStatusById,
-          [action.threadId]: {
-            isProcessing: false,
-            hasUnread: false,
-            isReviewing: false,
-            processingStartedAt: null,
-            lastDurationMs: null,
-          },
+          [action.threadId]: buildThreadStatus(),
         },
         activeThreadIdByWorkspace: {
           ...state.activeThreadIdByWorkspace,
@@ -131,6 +138,10 @@ export function reduceThreadLifecycle(
       const { [action.threadId]: ____, ...restDiffs } = state.turnDiffByThread;
       const { [action.threadId]: _____, ...restPlans } = state.planByThread;
       const { [action.threadId]: ______, ...restParents } = state.threadParentById;
+      const {
+        [action.threadId]: _______,
+        ...restRunningToolCalls
+      } = state.runningToolCallsByThread;
       return {
         ...state,
         threadsByWorkspace: {
@@ -140,6 +151,7 @@ export function reduceThreadLifecycle(
         itemsByThread: restItems,
         threadStatusById: restStatus,
         activeTurnIdByThread: restTurns,
+        runningToolCallsByThread: restRunningToolCalls,
         turnDiffByThread: restDiffs,
         planByThread: restPlans,
         threadParentById: restParents,
@@ -171,6 +183,7 @@ export function reduceThreadLifecycle(
       const lastDurationMs = previous?.lastDurationMs ?? null;
       const hasUnread = previous?.hasUnread ?? false;
       const isReviewing = previous?.isReviewing ?? false;
+      const activeFlags = previous?.activeFlags ?? [];
       if (action.isProcessing) {
         const nextStartedAt =
           wasProcessing && startedAt ? startedAt : action.timestamp;
@@ -180,6 +193,7 @@ export function reduceThreadLifecycle(
           isReviewing,
           processingStartedAt: nextStartedAt,
           lastDurationMs,
+          activeFlags,
         };
         if (previous && statusEquals(previous, nextStatus)) {
           return state;
@@ -199,10 +213,41 @@ export function reduceThreadLifecycle(
       const nextStatus: ThreadStatus = {
         isProcessing: false,
         hasUnread,
-        isReviewing,
+        isReviewing: false,
         processingStartedAt: null,
         lastDurationMs: nextDuration,
+        activeFlags: [],
       };
+      const hasRunningToolCalls = Boolean(
+        state.runningToolCallsByThread[action.threadId],
+      );
+      const { [action.threadId]: _, ...restRunningToolCalls } =
+        state.runningToolCallsByThread;
+      if (
+        previous &&
+        statusEquals(previous, nextStatus) &&
+        !hasRunningToolCalls
+      ) {
+        return state;
+      }
+      return {
+        ...state,
+        threadStatusById: {
+          ...state.threadStatusById,
+          [action.threadId]: nextStatus,
+        },
+        runningToolCallsByThread: hasRunningToolCalls
+          ? restRunningToolCalls
+          : state.runningToolCallsByThread,
+      };
+    }
+    case "setThreadActiveFlags": {
+      const previous = state.threadStatusById[action.threadId];
+      const nextActiveFlags = [...action.activeFlags];
+      const nextStatus: ThreadStatus = buildThreadStatus({
+        ...previous,
+        activeFlags: nextActiveFlags,
+      });
       if (previous && statusEquals(previous, nextStatus)) {
         return state;
       }
@@ -212,6 +257,85 @@ export function reduceThreadLifecycle(
           ...state.threadStatusById,
           [action.threadId]: nextStatus,
         },
+      };
+    }
+    case "markToolCallStarted": {
+      const previousForThread =
+        state.runningToolCallsByThread[action.toolCall.threadId] ?? {};
+      const previousToolCall = previousForThread[action.toolCall.id];
+      if (
+        previousToolCall &&
+        previousToolCall.turnId === action.toolCall.turnId &&
+        previousToolCall.toolType === action.toolCall.toolType &&
+        previousToolCall.title === action.toolCall.title &&
+        previousToolCall.detail === action.toolCall.detail &&
+        previousToolCall.startedAt === action.toolCall.startedAt &&
+        previousToolCall.lastSeenAt === action.toolCall.lastSeenAt
+      ) {
+        return state;
+      }
+      return {
+        ...state,
+        runningToolCallsByThread: {
+          ...state.runningToolCallsByThread,
+          [action.toolCall.threadId]: {
+            ...previousForThread,
+            [action.toolCall.id]: action.toolCall,
+          },
+        },
+      };
+    }
+    case "markToolCallCompleted": {
+      const previousForThread = state.runningToolCallsByThread[action.threadId];
+      if (!previousForThread?.[action.itemId]) {
+        return state;
+      }
+      const { [action.itemId]: _, ...remainingForThread } = previousForThread;
+      const nextRunningToolCallsByThread = {
+        ...state.runningToolCallsByThread,
+      };
+      if (Object.keys(remainingForThread).length === 0) {
+        delete nextRunningToolCallsByThread[action.threadId];
+      } else {
+        nextRunningToolCallsByThread[action.threadId] = remainingForThread;
+      }
+      return {
+        ...state,
+        runningToolCallsByThread: nextRunningToolCallsByThread,
+      };
+    }
+    case "clearRunningToolCalls": {
+      const previousForThread = state.runningToolCallsByThread[action.threadId];
+      if (!previousForThread) {
+        return state;
+      }
+      const turnId = action.turnId ?? null;
+      if (!turnId) {
+        const { [action.threadId]: _, ...remaining } = state.runningToolCallsByThread;
+        return {
+          ...state,
+          runningToolCallsByThread: remaining,
+        };
+      }
+      const remainingForThread = Object.fromEntries(
+        Object.entries(previousForThread).filter(
+          ([, toolCall]) => toolCall.turnId !== turnId,
+        ),
+      );
+      if (Object.keys(remainingForThread).length === Object.keys(previousForThread).length) {
+        return state;
+      }
+      const nextRunningToolCallsByThread = {
+        ...state.runningToolCallsByThread,
+      };
+      if (Object.keys(remainingForThread).length === 0) {
+        delete nextRunningToolCallsByThread[action.threadId];
+      } else {
+        nextRunningToolCallsByThread[action.threadId] = remainingForThread;
+      }
+      return {
+        ...state,
+        runningToolCallsByThread: nextRunningToolCallsByThread,
       };
     }
     case "setActiveTurnId":
@@ -230,6 +354,7 @@ export function reduceThreadLifecycle(
         isReviewing: action.isReviewing,
         processingStartedAt: previous?.processingStartedAt ?? null,
         lastDurationMs: previous?.lastDurationMs ?? null,
+        activeFlags: previous?.activeFlags ?? [],
       };
       if (previous && statusEquals(previous, nextStatus)) {
         return state;
@@ -250,6 +375,7 @@ export function reduceThreadLifecycle(
         isReviewing: previous?.isReviewing ?? false,
         processingStartedAt: previous?.processingStartedAt ?? null,
         lastDurationMs: previous?.lastDurationMs ?? null,
+        activeFlags: previous?.activeFlags ?? [],
       };
       if (previous && statusEquals(previous, nextStatus)) {
         return state;

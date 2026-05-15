@@ -69,11 +69,13 @@ export function buildThreadSummaryFromThread({
     isSubagentThreadSource(thread.source) ||
     Boolean(getParentThreadIdFromThread(thread)) ||
     Boolean(subagentMetadata.nickname || subagentMetadata.role);
+  const provider = asString(thread.provider).trim().toLowerCase() === "claude" ? "claude" : "codex";
   return {
     id,
     name,
     updatedAt: getThreadTimestamp(thread),
     createdAt: getThreadCreatedTimestamp(thread),
+    provider,
     ...(metadata.modelId ? { modelId: metadata.modelId } : {}),
     ...(metadata.effort ? { effort: metadata.effort } : {}),
     ...(isSubagent ? { isSubagent: true } : {}),

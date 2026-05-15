@@ -292,6 +292,7 @@ export function ComposerInput({
           <div className="composer-input-actions">
             {onToggleExpand && (
               <button
+                type="button"
                 className={`composer-action composer-action--expand${
                   isExpanded ? " is-active" : ""
                 }`}
@@ -304,6 +305,7 @@ export function ComposerInput({
               </button>
             )}
             <button
+              type="button"
               className={`composer-action composer-action--mic${
                 isDictationBusy ? " is-active" : ""
               }${isDictationProcessing ? " is-processing is-stop" : ""}${
@@ -323,11 +325,12 @@ export function ComposerInput({
               )}
             </button>
             <button
+              type="button"
               className={`composer-action${canStop ? " is-stop" : " is-send"}${
                 canStop && isProcessing ? " is-loading" : ""
               }`}
               onClick={handleActionClick}
-              disabled={(disabled && !canStop) || isDictationBusy || (!canStop && !canSend)}
+              disabled={(disabled && !canStop) || (!canStop && !canSend)}
               aria-label={canStop ? "Stop" : sendLabel}
               title={canStop ? "Stop" : sendLabel}
             >

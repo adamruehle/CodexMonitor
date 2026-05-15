@@ -126,6 +126,8 @@ export default function MainApp() {
     setThreadListSortKey,
     threadListOrganizeMode,
     setThreadListOrganizeMode,
+    threadProviderFilter,
+    setThreadProviderFilter,
   } = useThreadListSortKey();
   const [activeTab, setActiveTab] = useState<
     "home" | "projects" | "codex" | "git" | "log"
@@ -453,6 +455,7 @@ export default function MainApp() {
     removeThread,
     pinThread,
     unpinThread,
+    reorderPinnedThread,
     isThreadPinned,
     getPinTimestamp,
     renameThread,
@@ -910,7 +913,8 @@ export default function MainApp() {
     [appSettings.workspaceGroups],
   );
 
-  const { handleMoveWorkspace } = useWorkspaceOrderingOrchestration({
+  const { handleMoveWorkspace, handleReorderWorkspace } =
+    useWorkspaceOrderingOrchestration({
     workspaces,
     workspacesById,
     updateWorkspaceSettings,
@@ -1614,7 +1618,10 @@ export default function MainApp() {
     onSetThreadListSortKey: handleSetThreadListSortKey,
     threadListOrganizeMode,
     onSetThreadListOrganizeMode: setThreadListOrganizeMode,
+    threadProviderFilter,
+    onSetThreadProviderFilter: setThreadProviderFilter,
     onRefreshAllThreads: handleRefreshAllWorkspaceThreads,
+    onReorderWorkspace: handleReorderWorkspace,
     activeWorkspace,
     activeWorkspaceId,
     activeThreadId,
@@ -1660,6 +1667,7 @@ export default function MainApp() {
     threadPinning: {
       pinThread,
       unpinThread,
+      reorderPinnedThread,
       isThreadPinned,
       getPinTimestamp,
       getThreadArgsBadge,
@@ -1787,6 +1795,7 @@ export default function MainApp() {
     dismissErrorToast,
     showDebugButton,
     handleDebugClick,
+    onDebug: addDebugEntry,
   });
 
   const {

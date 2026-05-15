@@ -761,7 +761,15 @@ impl DaemonState {
         limit: Option<u32>,
         sort_key: Option<String>,
     ) -> Result<Value, String> {
-        codex_core::list_threads_core(&self.sessions, workspace_id, cursor, limit, sort_key).await
+        codex_core::list_threads_core(
+            &self.sessions,
+            &self.workspaces,
+            workspace_id,
+            cursor,
+            limit,
+            sort_key,
+        )
+        .await
     }
 
     async fn list_mcp_server_status(

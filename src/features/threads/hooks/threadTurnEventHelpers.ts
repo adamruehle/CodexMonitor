@@ -18,6 +18,46 @@ export function normalizeThreadStatusType(status: Record<string, unknown>): stri
     .replace(/[\s_-]/g, "");
 }
 
+const ACTIVE_THREAD_STATUS_TYPES = new Set([
+  "active",
+  "inprogress",
+  "running",
+  "processing",
+  "pending",
+  "started",
+  "queued",
+  "waiting",
+  "blocked",
+  "needsinput",
+  "requiresaction",
+  "awaitinginput",
+  "waitingforinput",
+]);
+
+const INACTIVE_THREAD_STATUS_TYPES = new Set([
+  "idle",
+  "notloaded",
+  "systemerror",
+  "terminal",
+  "completed",
+  "done",
+  "failed",
+  "error",
+  "canceled",
+  "cancelled",
+  "aborted",
+  "stopped",
+  "interrupted",
+]);
+
+export function isActiveThreadStatusType(statusType: string) {
+  return ACTIVE_THREAD_STATUS_TYPES.has(statusType);
+}
+
+export function isInactiveThreadStatusType(statusType: string) {
+  return INACTIVE_THREAD_STATUS_TYPES.has(statusType);
+}
+
 export function getLiveThreadSubagentSummaryPatch(thread: Record<string, unknown>) {
   const metadata = getSubagentMetadataFromThread(thread);
   const nickname = asString(metadata.nickname ?? "").trim();

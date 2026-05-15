@@ -162,6 +162,7 @@ export type ThreadSummary = {
   name: string;
   updatedAt: number;
   createdAt?: number;
+  provider?: ThreadProvider;
   modelId?: string | null;
   effort?: string | null;
   isSubagent?: boolean;
@@ -169,6 +170,8 @@ export type ThreadSummary = {
   subagentRole?: string | null;
 };
 
+export type ThreadProvider = "codex" | "claude";
+export type ThreadProviderFilter = "all" | ThreadProvider;
 export type ThreadListSortKey = "created_at" | "updated_at";
 export type ThreadListOrganizeMode =
   | "by_project"
@@ -226,7 +229,8 @@ export type PersonalityPreference = "friendly" | "pragmatic";
 export type FollowUpMessageBehavior = "queue" | "steer";
 export type ComposerSendIntent = "default" | "queue" | "steer";
 export type SendMessageResult = {
-  status: "sent" | "blocked" | "steer_failed";
+  status: "sent" | "queued" | "blocked" | "steer_failed";
+  message?: string;
 };
 
 export type ComposerEditorPreset = "default" | "helpful" | "smart";

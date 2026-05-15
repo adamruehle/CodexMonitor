@@ -1,11 +1,13 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import type { ConversationItem, TurnPlan } from "../../../types";
+import { summarizeCommandAction } from "./toolActionSummary";
 
 export type ToolSummary = {
   label: string;
   value?: string;
   detail?: string;
   output?: string;
+  rawCommand?: string;
 };
 
 export type StatusTone = "completed" | "processing" | "failed" | "unknown";
@@ -460,6 +462,47 @@ function shouldWrapCompletedTrailingWorkGroup(items: ConversationItem[]) {
   return items.some((item) => isAssistantMessage(item) || isUserMessage(item));
 }
 
+function isHookToolItem(
+  item: ConversationItem,
+): item is Extract<ConversationItem, { kind: "tool" }> {
+  return item.kind === "tool" && item.toolType === "hook";
+}
+
+function hookItemsFromEntry(entry: MessageListEntry): ConversationItem[] | null {
+  if (entry.kind === "item" && isHookToolItem(entry.item)) {
+    return [entry.item];
+  }
+  if (entry.kind !== "toolGroup") {
+    return null;
+  }
+  if (entry.group.items.every(isHookToolItem)) {
+    return entry.group.items;
+  }
+  return null;
+}
+
+function findPreviousWorkGroupIndex(entries: MessageListEntry[]) {
+  for (let cursor = entries.length - 1; cursor >= 0; cursor -= 1) {
+    const entry = entries[cursor];
+    if (entry.kind === "workGroup") {
+      return cursor;
+    }
+    if (entry.kind === "item" && isUserMessage(entry.item)) {
+      return -1;
+    }
+  }
+  return -1;
+}
+
+function appendItemsToWorkGroup(group: WorkGroup, items: ConversationItem[]): WorkGroup {
+  return buildWorkGroup(
+    [...group.items, ...items],
+    group.isActive,
+    group.items,
+    group.durationMs,
+  );
+}
+
 function buildWorkGroup(
   items: ConversationItem[],
   isActive: boolean,
@@ -734,24 +777,33 @@ export function buildMessageEntries(
     index = end;
   }
 
-  return entries;
+  return foldOrphanHookEntriesIntoWorkGroups(entries);
 }
 
-export function cleanCommandText(commandText: string) {
-  if (!commandText) {
-    return "";
-  }
-  const trimmed = commandText.trim();
-  const withoutLabel = trimmed.replace(/^Command:\s*/i, "");
-  const shellMatch = trimmed.match(
-    /^(?:\/\S+\/)?(?:bash|zsh|sh|fish)(?:\.exe)?\s+-lc\s+(['"])([\s\S]+)\1$/,
-  );
-  const inner = shellMatch ? shellMatch[2] : withoutLabel;
-  const cdMatch = inner.match(
-    /^\s*cd\s+[^&;]+(?:\s*&&\s*|\s*;\s*)([\s\S]+)$/i,
-  );
-  const stripped = cdMatch ? cdMatch[1] : inner;
-  return stripped.trim();
+function foldOrphanHookEntriesIntoWorkGroups(entries: MessageListEntry[]) {
+  const folded: MessageListEntry[] = [];
+  entries.forEach((entry) => {
+    const hookItems = hookItemsFromEntry(entry);
+    if (!hookItems) {
+      folded.push(entry);
+      return;
+    }
+    const previousWorkGroupIndex = findPreviousWorkGroupIndex(folded);
+    if (previousWorkGroupIndex < 0) {
+      folded.push(entry);
+      return;
+    }
+    const previousWorkGroup = folded[previousWorkGroupIndex];
+    if (previousWorkGroup.kind !== "workGroup") {
+      folded.push(entry);
+      return;
+    }
+    folded[previousWorkGroupIndex] = {
+      kind: "workGroup",
+      group: appendItemsToWorkGroup(previousWorkGroup.group, hookItems),
+    };
+  });
+  return folded;
 }
 
 export function buildToolSummary(
@@ -759,11 +811,9 @@ export function buildToolSummary(
   commandText: string,
 ): ToolSummary {
   if (item.toolType === "commandExecution") {
-    const cleanedCommand = cleanCommandText(commandText);
+    const commandSummary = summarizeCommandAction(commandText);
     return {
-      label: "command",
-      value: cleanedCommand || "Command",
-      detail: "",
+      ...commandSummary,
       output: item.output || "",
     };
   }
@@ -804,6 +854,44 @@ export function buildToolSummary(
   if (item.toolType === "mcpToolCall") {
     const toolName = toolNameFromTitle(item.title);
     const args = parseToolArgs(item.detail);
+    const normalizedToolName = toolName.toLowerCase();
+    if (normalizedToolName === "exec_command") {
+      const command = firstStringField(args, ["cmd", "command"]);
+      if (command) {
+        const commandSummary = summarizeCommandAction(command);
+        return {
+          label: commandSummary.label,
+          value: commandSummary.value,
+          detail: item.detail || "",
+          output: item.output || "",
+        };
+      }
+    }
+    if (normalizedToolName === "apply_patch") {
+      return {
+        label: "edit",
+        value: "files with patch",
+        detail: item.detail || "",
+        output: item.output || "",
+      };
+    }
+    if (normalizedToolName === "view_image") {
+      const imagePath = firstStringField(args, ["path", "file"]);
+      return {
+        label: "view",
+        value: basename(imagePath) || "image",
+        detail: item.detail || "",
+        output: item.output || "",
+      };
+    }
+    if (normalizedToolName === "parallel") {
+      return {
+        label: "run",
+        value: "parallel tool calls",
+        detail: item.detail || "",
+        output: item.output || "",
+      };
+    }
     if (toolName.toLowerCase().includes("search")) {
       return {
         label: statusToneFromText(item.status) === "processing" ? "searching" : "searched",

@@ -587,7 +587,10 @@ describe("useThreadMessaging telemetry", () => {
         "steer should fail",
         [],
       );
-      expect(sendResult).toEqual({ status: "steer_failed" });
+      expect(sendResult).toEqual({
+        status: "steer_failed",
+        message: "Turn steer failed: no active turn to steer",
+      });
     });
 
     expect(steerTurnService).toHaveBeenCalledTimes(1);
@@ -658,7 +661,10 @@ describe("useThreadMessaging telemetry", () => {
         "steer timeout",
         [],
       );
-      expect(sendResult).toEqual({ status: "steer_failed" });
+      expect(sendResult).toEqual({
+        status: "steer_failed",
+        message: "Turn steer failed: steer request timed out",
+      });
     });
 
     expect(steerTurnService).toHaveBeenCalledTimes(1);
@@ -729,7 +735,10 @@ describe("useThreadMessaging telemetry", () => {
         "steer exception",
         [],
       );
-      expect(sendResult).toEqual({ status: "steer_failed" });
+      expect(sendResult).toEqual({
+        status: "steer_failed",
+        message: "Turn steer failed: steer network failure",
+      });
     });
 
     expect(sendUserMessageService).not.toHaveBeenCalled();

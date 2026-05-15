@@ -7,7 +7,22 @@ import {
   buildItemForDisplay,
   handleConvertedItemEffects,
 } from "./threadItemEventHelpers";
-import type { ThreadAction } from "./useThreadsReducer";
+import type { RunningToolCall, ThreadAction } from "./useThreadsReducer";
+
+const WATCHDOG_TOOL_TYPES = new Set([
+  "commandExecution",
+  "mcpToolCall",
+  "collabToolCall",
+  "collabAgentToolCall",
+]);
+
+function truncateToolDetail(value: string) {
+  const normalized = value.trim();
+  if (normalized.length <= 2_000) {
+    return normalized;
+  }
+  return `${normalized.slice(0, 2_000)}...`;
+}
 
 function itemTurnId(item: Record<string, unknown>) {
   const raw = item.turnId ?? item.turn_id ?? null;
@@ -27,6 +42,38 @@ function itemTimestampMs(item: Record<string, unknown>) {
       item.updated_at,
   );
   return timestamp > 0 ? timestamp : null;
+}
+
+function buildRunningToolCall({
+  workspaceId,
+  threadId,
+  turnId,
+  converted,
+  timestampMs,
+}: {
+  workspaceId: string;
+  threadId: string;
+  turnId: string | null;
+  converted: ReturnType<typeof buildConversationItem>;
+  timestampMs: number;
+}): RunningToolCall | null {
+  if (!converted || converted.kind !== "tool") {
+    return null;
+  }
+  if (!WATCHDOG_TOOL_TYPES.has(converted.toolType)) {
+    return null;
+  }
+  return {
+    id: converted.id,
+    workspaceId,
+    threadId,
+    turnId,
+    toolType: converted.toolType,
+    title: converted.title,
+    detail: truncateToolDetail(converted.detail),
+    startedAt: timestampMs,
+    lastSeenAt: Date.now(),
+  };
 }
 
 type UseThreadItemEventsOptions = {
@@ -106,10 +153,29 @@ export function useThreadItemEvents({
         }
       }
       const itemForDisplay = buildItemForDisplay(item, shouldMarkProcessing);
+      const timestampMs = itemTimestampMs(item) ?? Date.now();
       const converted = buildConversationItem(itemForDisplay, {
         turnId: effectiveTurnId,
-        timestampMs: itemTimestampMs(item) ?? Date.now(),
+        timestampMs,
       });
+      const runningToolCall = buildRunningToolCall({
+        workspaceId,
+        threadId,
+        turnId: effectiveTurnId,
+        converted,
+        timestampMs,
+      });
+      if (runningToolCall) {
+        if (shouldMarkProcessing && canMarkProcessing) {
+          dispatch({ type: "markToolCallStarted", toolCall: runningToolCall });
+        } else {
+          dispatch({
+            type: "markToolCallCompleted",
+            threadId,
+            itemId: runningToolCall.id,
+          });
+        }
+      }
       handleConvertedItemEffects({
         converted,
         workspaceId,

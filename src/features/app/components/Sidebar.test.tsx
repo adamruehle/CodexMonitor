@@ -29,6 +29,7 @@ const baseProps = {
   threadListOrganizeMode: "by_project" as const,
   onSetThreadListOrganizeMode: vi.fn(),
   onRefreshAllThreads: vi.fn(),
+  onReorderWorkspace: vi.fn(),
   activeWorkspaceId: null,
   activeThreadId: null,
   accountRateLimits: null,
@@ -53,6 +54,7 @@ const baseProps = {
   onSyncThread: vi.fn(),
   pinThread: vi.fn(() => false),
   unpinThread: vi.fn(),
+  reorderPinnedThread: vi.fn(),
   isThreadPinned: vi.fn(() => false),
   getPinTimestamp: vi.fn(() => null),
   onRenameThread: vi.fn(),
@@ -696,6 +698,94 @@ describe("Sidebar", () => {
 
     fireEvent.click(draftRow);
     expect(onSelectWorkspace).toHaveBeenCalledWith("ws-1");
+  });
+
+  it("reorders workspace cards by drag and drop", () => {
+    const onReorderWorkspace = vi.fn();
+    const { container } = render(
+      <Sidebar
+        {...baseProps}
+        onReorderWorkspace={onReorderWorkspace}
+        workspaces={[
+          {
+            id: "ws-1",
+            name: "Alpha Project",
+            path: "/tmp/alpha",
+            connected: true,
+            settings: { sidebarCollapsed: false, sortOrder: 0 },
+          },
+          {
+            id: "ws-2",
+            name: "Beta Project",
+            path: "/tmp/beta",
+            connected: true,
+            settings: { sidebarCollapsed: false, sortOrder: 1 },
+          },
+        ]}
+        groupedWorkspaces={[
+          {
+            id: null,
+            name: "Workspaces",
+            workspaces: [
+              {
+                id: "ws-1",
+                name: "Alpha Project",
+                path: "/tmp/alpha",
+                connected: true,
+                settings: { sidebarCollapsed: false, sortOrder: 0 },
+              },
+              {
+                id: "ws-2",
+                name: "Beta Project",
+                path: "/tmp/beta",
+                connected: true,
+                settings: { sidebarCollapsed: false, sortOrder: 1 },
+              },
+            ],
+          },
+        ]}
+      />,
+    );
+
+    const dragItem = screen
+      .getByText("Beta Project")
+      .closest(".workspace-reorder-item");
+    const dropItem = screen
+      .getByText("Alpha Project")
+      .closest(".workspace-reorder-item");
+    expect(dragItem).toBeTruthy();
+    expect(dropItem).toBeTruthy();
+    if (!dragItem || !dropItem) {
+      throw new Error("Missing workspace drag or drop item");
+    }
+
+    Object.defineProperty(dropItem, "getBoundingClientRect", {
+      value: () => ({
+        top: 100,
+        bottom: 160,
+        height: 60,
+        left: 0,
+        right: 260,
+        width: 260,
+        x: 0,
+        y: 100,
+        toJSON: () => ({}),
+      }),
+    });
+    const dataTransfer = {
+      effectAllowed: "",
+      dropEffect: "",
+      setData: vi.fn(),
+    };
+
+    fireEvent.dragStart(dragItem, { dataTransfer });
+    fireEvent.dragOver(dropItem, { dataTransfer, clientY: 110 });
+    fireEvent.drop(dropItem, { dataTransfer, clientY: 110 });
+
+    expect(onReorderWorkspace).toHaveBeenCalledWith("ws-2", "ws-1", "before");
+    expect(
+      container.querySelector(".workspace-reorder-item.drop-before"),
+    ).toBeNull();
   });
 
   it("renders clone agents nested under their source project", () => {

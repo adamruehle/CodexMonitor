@@ -9,6 +9,7 @@ import type {
   AppMention,
   ComposerSendIntent,
   FollowUpMessageBehavior,
+  SendMessageResult,
 } from "../../../types";
 
 vi.mock("../../../services/dragDrop", () => ({
@@ -35,12 +36,14 @@ type HarnessProps = {
     images: string[],
     appMentions?: AppMention[],
     submitIntent?: ComposerSendIntent,
-  ) => void;
+  ) => void | SendMessageResult | Promise<void | SendMessageResult>;
   apps?: AppOption[];
   isProcessing?: boolean;
   followUpMessageBehavior?: FollowUpMessageBehavior;
   steerAvailable?: boolean;
   selectedServiceTier?: "fast" | "flex" | null;
+  dictationState?: "idle" | "listening" | "processing";
+  dictationEnabled?: boolean;
   messageGroupControls?: {
     hasAnyGroups: boolean;
     canExpandAny: boolean;
@@ -57,6 +60,8 @@ function ComposerHarness({
   followUpMessageBehavior = "queue",
   steerAvailable = false,
   selectedServiceTier = null,
+  dictationState = "idle",
+  dictationEnabled = false,
   messageGroupControls = null,
 }: HarnessProps) {
   const [draftText, setDraftText] = useState("");
@@ -93,7 +98,9 @@ function ComposerHarness({
       draftText={draftText}
       onDraftChange={setDraftText}
       textareaRef={textareaRef}
-      dictationEnabled={false}
+      dictationState={dictationState}
+      dictationEnabled={dictationEnabled}
+      onCancelDictation={() => {}}
     />
   );
 }
@@ -103,6 +110,7 @@ describe("Composer send triggers", () => {
     cleanup();
     vi.mocked(isMobilePlatform).mockReturnValue(false);
     vi.restoreAllMocks();
+    globalThis.localStorage.clear();
   });
 
   it("sends once on Enter", () => {
@@ -153,6 +161,100 @@ describe("Composer send triggers", () => {
 
     expect(onSend).toHaveBeenCalledTimes(1);
     expect(onSend).toHaveBeenCalledWith("from button", [], undefined, "default");
+  });
+
+  it("keeps the draft and shows the reason when send is blocked", async () => {
+    const onSend = vi.fn(async () => ({
+      status: "blocked" as const,
+      message: "No active workspace is selected.",
+    }));
+    render(<ComposerHarness onSend={onSend} />);
+
+    const textarea = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: "please send this" } });
+    fireEvent.click(screen.getByLabelText("Send"));
+
+    expect(await screen.findByText("No active workspace is selected.")).toBeTruthy();
+    expect(textarea.value).toBe("please send this");
+  });
+
+  it("clears the draft after an async successful send", async () => {
+    const onSend = vi.fn(async () => ({ status: "sent" as const }));
+    render(<ComposerHarness onSend={onSend} />);
+
+    const textarea = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: "send then clear" } });
+    fireEvent.click(screen.getByLabelText("Send"));
+
+    await screen.findByDisplayValue("");
+    expect(onSend).toHaveBeenCalledWith("send then clear", [], undefined, "default");
+  });
+
+  it("clears the draft after a successful send even when prompt history storage is full", async () => {
+    vi.spyOn(globalThis.localStorage, "setItem").mockImplementation(() => {
+      throw new DOMException("The quota has been exceeded.", "QuotaExceededError");
+    });
+    const onSend = vi.fn(async () => ({ status: "sent" as const }));
+    render(<ComposerHarness onSend={onSend} />);
+
+    const textarea = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: "send despite full storage" } });
+    fireEvent.click(screen.getByLabelText("Send"));
+
+    await screen.findByDisplayValue("");
+    expect(screen.queryByText("The quota has been exceeded.")).toBeNull();
+    expect(onSend).toHaveBeenCalledWith(
+      "send despite full storage",
+      [],
+      undefined,
+      "default",
+    );
+  });
+
+  it("still sends typed text on Enter when dictation is processing", () => {
+    const onSend = vi.fn();
+    render(
+      <ComposerHarness
+        onSend={onSend}
+        dictationState="processing"
+        dictationEnabled={true}
+      />,
+    );
+
+    const textarea = screen.getByRole("textbox");
+    fireEvent.change(textarea, { target: { value: "manual text wins" } });
+    fireEvent.keyDown(textarea, { key: "Enter" });
+
+    expect(onSend).toHaveBeenCalledTimes(1);
+    expect(onSend).toHaveBeenCalledWith(
+      "manual text wins",
+      [],
+      undefined,
+      "default",
+    );
+  });
+
+  it("still sends typed text from the button when dictation is processing", () => {
+    const onSend = vi.fn();
+    render(
+      <ComposerHarness
+        onSend={onSend}
+        dictationState="processing"
+        dictationEnabled={true}
+      />,
+    );
+
+    const textarea = screen.getByRole("textbox");
+    fireEvent.change(textarea, { target: { value: "button manual text" } });
+    fireEvent.click(screen.getByLabelText("Send"));
+
+    expect(onSend).toHaveBeenCalledTimes(1);
+    expect(onSend).toHaveBeenCalledWith(
+      "button manual text",
+      [],
+      undefined,
+      "default",
+    );
   });
 
   it("shows the fast-mode indicator when enabled", () => {

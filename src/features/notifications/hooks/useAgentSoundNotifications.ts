@@ -22,6 +22,17 @@ function buildTurnKey(workspaceId: string, turnId: string) {
   return `${workspaceId}:${turnId}`;
 }
 
+function buildTerminalKey(
+  workspaceId: string,
+  threadId: string,
+  turnId: string,
+) {
+  const normalizedTurnId = turnId.trim();
+  return normalizedTurnId
+    ? `${workspaceId}:turn:${normalizedTurnId}`
+    : `${workspaceId}:thread:${threadId}`;
+}
+
 export function useAgentSoundNotifications({
   enabled,
   isWindowFocused,
@@ -31,6 +42,7 @@ export function useAgentSoundNotifications({
   const turnStartById = useRef(new Map<string, number>());
   const turnStartByThread = useRef(new Map<string, number>());
   const lastPlayedAtByThread = useRef(new Map<string, number>());
+  const handledTerminalKeys = useRef(new Set<string>());
 
   const playSound = useCallback(
     (url: string, label: "success" | "error") => {
@@ -98,9 +110,24 @@ export function useAgentSoundNotifications({
     [enabled, isWindowFocused, minDurationMs],
   );
 
+  const shouldHandleTerminalEvent = useCallback(
+    (workspaceId: string, threadId: string, turnId: string) => {
+      const key = buildTerminalKey(workspaceId, threadId, turnId);
+      if (handledTerminalKeys.current.has(key)) {
+        return false;
+      }
+      handledTerminalKeys.current.add(key);
+      return true;
+    },
+    [],
+  );
+
   const handleTurnStarted = useCallback(
     (workspaceId: string, threadId: string, turnId: string) => {
       const startedAt = Date.now();
+      handledTerminalKeys.current.delete(
+        buildTerminalKey(workspaceId, threadId, turnId),
+      );
       turnStartByThread.current.set(
         buildThreadKey(workspaceId, threadId),
         startedAt,
@@ -114,6 +141,9 @@ export function useAgentSoundNotifications({
 
   const handleTurnCompleted = useCallback(
     (workspaceId: string, threadId: string, turnId: string) => {
+      if (!shouldHandleTerminalEvent(workspaceId, threadId, turnId)) {
+        return;
+      }
       const durationMs = consumeDuration(workspaceId, threadId, turnId);
       const threadKey = buildThreadKey(workspaceId, threadId);
       if (!shouldPlaySound(durationMs, threadKey)) {
@@ -121,7 +151,7 @@ export function useAgentSoundNotifications({
       }
       playSound(successSoundUrl, "success");
     },
-    [consumeDuration, playSound, shouldPlaySound],
+    [consumeDuration, playSound, shouldHandleTerminalEvent, shouldPlaySound],
   );
 
   const handleTurnError = useCallback(
@@ -134,6 +164,9 @@ export function useAgentSoundNotifications({
       if (payload.willRetry) {
         return;
       }
+      if (!shouldHandleTerminalEvent(workspaceId, threadId, turnId)) {
+        return;
+      }
       const durationMs = consumeDuration(workspaceId, threadId, turnId);
       const threadKey = buildThreadKey(workspaceId, threadId);
       if (!shouldPlaySound(durationMs, threadKey)) {
@@ -141,7 +174,7 @@ export function useAgentSoundNotifications({
       }
       playSound(errorSoundUrl, "error");
     },
-    [consumeDuration, playSound, shouldPlaySound],
+    [consumeDuration, playSound, shouldHandleTerminalEvent, shouldPlaySound],
   );
 
   const handleItemStarted = useCallback(
@@ -158,18 +191,6 @@ export function useAgentSoundNotifications({
     [recordStartIfMissing],
   );
 
-  const handleAgentMessageCompleted = useCallback(
-    (event: { workspaceId: string; threadId: string }) => {
-      const durationMs = consumeDuration(event.workspaceId, event.threadId, "");
-      const threadKey = buildThreadKey(event.workspaceId, event.threadId);
-      if (!shouldPlaySound(durationMs, threadKey)) {
-        return;
-      }
-      playSound(successSoundUrl, "success");
-    },
-    [consumeDuration, playSound, shouldPlaySound],
-  );
-
   const handlers = useMemo(
     () => ({
       onTurnStarted: handleTurnStarted,
@@ -177,10 +198,8 @@ export function useAgentSoundNotifications({
       onTurnError: handleTurnError,
       onItemStarted: handleItemStarted,
       onAgentMessageDelta: handleAgentMessageDelta,
-      onAgentMessageCompleted: handleAgentMessageCompleted,
     }),
     [
-      handleAgentMessageCompleted,
       handleAgentMessageDelta,
       handleItemStarted,
       handleTurnCompleted,

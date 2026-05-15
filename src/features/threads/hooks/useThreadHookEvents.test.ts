@@ -65,6 +65,7 @@ describe("useThreadHookEvents", () => {
         status: "running",
         output: "",
         durationMs: null,
+        turnId: "turn-1",
       },
       hasCustomName: false,
     });
@@ -89,7 +90,7 @@ describe("useThreadHookEvents", () => {
     const { result, dispatch } = setup();
 
     act(() => {
-      result.current.onHookCompleted("ws-1", "thread-1", null, {
+      result.current.onHookCompleted("ws-1", "thread-1", "turn-1", {
         id: "hook-1",
         eventName: "stop",
         handlerType: "agent",
@@ -115,6 +116,7 @@ describe("useThreadHookEvents", () => {
         status: "completed",
         output: "[feedback] Captured summary",
         durationMs: 1250,
+        turnId: "turn-1",
       },
       hasCustomName: false,
     });
@@ -145,6 +147,7 @@ describe("useThreadHookEvents", () => {
         status: "failed",
         output: "",
         durationMs: null,
+        turnId: null,
       },
       hasCustomName: false,
     });
@@ -209,6 +212,7 @@ describe("useThreadHookEvents", () => {
         status: "completed",
         output: "",
         durationMs: 3100,
+        turnId: null,
       },
       hasCustomName: false,
     });

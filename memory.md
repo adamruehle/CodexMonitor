@@ -101,3 +101,139 @@ Root cause: The structured `TurnPlan` state and the transcript item stream were 
 Fix: Pass `activePlan` into `Messages`, render a dedicated inline checklist entry from `TurnPlan`, auto-scroll it with plan updates, and suppress the duplicate synthetic plan tool row while structured plan state is active
 Verification: `npm run test -- src/features/messages/components/Messages.test.tsx`, `npm run typecheck`, and `git diff --check`
 Reuse hint: If CodexMonitor needs Codex-app-style task progress, treat `TurnPlan` as the primary render source and use the tool row only as fallback/history
+
+## [2026-05-01] Completed review turns must not keep the composer locked
+Context: CodexMonitor composer send path after inline reviews or stale resumed review markers
+Signal: A chat could look idle with text and images in the composer, but Enter and the send button did nothing because `isReviewing` stayed true after the turn was no longer processing
+Root cause: `markProcessing(false)` preserved `isReviewing`, and resume hydration trusted review markers even when no active turn was present
+Fix: Clear `isReviewing` when processing completes, treat resumed review state as valid only while a turn is active, and mask stale review flags from the composer state
+Verification: `npm run test`, `npm run typecheck`, `cd src-tauri && cargo check`, and `git diff --check`
+Reuse hint: If sending is silently disabled while the UI shows an idle thread, inspect stale `isReviewing` before debugging image upload or the backend `turn/start` path
+
+## [2026-05-01] Dictation state must not block manual chat sends
+Context: CodexMonitor composer and workspace-home send controls
+Signal: The textarea remained editable with draft text present, but pressing Enter or clicking send did nothing
+Root cause: `dictationState !== "idle"` disabled the send button and made Enter return early, so a stale dictation `processing` or `listening` state could brick manual chat sends while leaving typing enabled
+Fix: Allow manual text/image sends regardless of dictation busy state; keep dictation controls responsible for canceling or stopping dictation
+Verification: `npm run test -- src/features/composer/components/ComposerSend.test.tsx src/features/composer/components/ComposerInput.dictation.test.tsx src/features/workspaces/hooks/useWorkspaceHome.test.tsx`, `npm run test`, `npm run typecheck`, and `git diff --check`
+Reuse hint: If the textarea accepts typing but both Enter and the send button are no-ops, inspect button disabled gates like dictation before backend send routing
+
+## [2026-05-01] Composer sends must return explicit results
+Context: CodexMonitor composer send pipeline across normal chat, queued sends, steer, and PR composer mode
+Signal: A draft could remain in the composer after Enter or send click with no visible explanation when a downstream send path blocked, failed, or returned early
+Root cause: Several send paths returned `void`, so the composer could not distinguish success from blocked sends and could not surface the reason to the user
+Fix: Propagate `SendMessageResult` through queued send, thread orchestration, PR composer send, and thread messaging; keep drafts on `blocked` / `steer_failed` and render a composer error message
+Verification: `npm run typecheck`, `npm run test`, and `git diff --check`
+Reuse hint: If sending looks like a no-op, require the entire send chain to return `{ status, message? }` before adding UI workarounds
+
+## [2026-05-01] Persist dev send traces outside the debug panel
+Context: CodexMonitor dev-mode send/steer debugging
+Signal: The debug panel could miss the decisive send lifecycle because non-alert entries were dropped while the panel was closed, and refresh/restart erased the in-memory trail
+Root cause: `useDebugLog()` only retained most entries in React state when the panel was open; no repo-local durable trace existed for composer decisions, RPC responses, or turn lifecycle events
+Fix: Add a rolling JSONL dev log at `logs/codex-monitor-dev.jsonl`, persist selected debug entries through a Tauri command, and log composer/queue plus `turn/start`/`turn/steer` outcomes with sanitized payloads
+Verification: `npm run typecheck`, `npm run test`, `cd src-tauri && cargo check`, and `git diff --check`
+Reuse hint: If CodexMonitor UI state disagrees with the visible transcript, inspect `logs/codex-monitor-dev.jsonl` before guessing whether the backend, composer, or event lifecycle is at fault
+
+## [2026-05-01] Terminal replay events must rehydrate turns as inactive
+Context: CodexMonitor reload/resume after a Codex turn ends and the UI rebuilds thread state from JSONL session replay
+Signal: Reloaded chats could show the final assistant message or `Session stopped.` while the chat still showed `Working...`, causing later sends or work-group compaction to behave like the turn was still active
+Root cause: Session replay handled only part of the terminal `event_msg` surface. It ignored production JSONL `payload.type = "task_complete"` and initially also missed `turn_aborted`, while the live status handler only cleared a narrow set of idle statuses
+Fix: Enrich resumed thread turns with terminal status plus completed timestamp from replayed terminal `event_msg` records, mapping `task_complete` to `completed`, `turn_aborted`/`task_interrupted` to `interrupted`, and other terminal task events to inactive states; keep live stopped/interrupted/aborted/completed/error statuses inactive as well
+Verification: `npm run test`, `npm run typecheck`, `cd src-tauri && cargo check`, focused `cargo test enrich_thread_response_replay_marks_`, and session replay validation against JSONL files that end with `event_msg.task_complete`
+Reuse hint: If a reloaded thread still looks active after the transcript already shows the final answer, inspect the session JSONL for terminal `event_msg` records before trusting sparse `thread/resume` turn status
+
+## [2026-05-01] Prompt history quota errors must not fail successful sends
+Context: CodexMonitor composer send path in dev-mode Tauri/WebKit with large local transcript storage
+Signal: The Codex turn visibly started and completed, but the composer showed `The quota has been exceeded.` and kept the submitted text in the input
+Root cause: `recordHistory()` wrote prompt history to `localStorage` inside the post-success composer path; when WebKit storage was full, the quota exception rejected the successful send continuation and the composer treated it as a send failure
+Fix: Make prompt-history persistence best-effort and isolate history recording from the send-success cleanup path so a successful `turn/start` still clears the draft
+Verification: `npm run test -- src/features/composer/hooks/usePromptHistory.test.tsx src/features/composer/components/ComposerSend.test.tsx`, `npm run typecheck`, `npm run test`, and `git diff --check`
+Reuse hint: If logs show `turn/start result` status `sent` followed by `composer/local cleared draft` and then a quota-looking composer error, inspect local Web Storage writes before blaming Codex API quota
+
+## [2026-05-01] Hung MCP tools can only be recovered at the turn boundary
+Context: CodexMonitor app-level recovery for tool calls that never return
+Signal: A Codex turn can remain stuck indefinitely while an MCP/tool call is running, with no app-side way to cancel that single tool invocation
+Root cause: CodexMonitor only owns the Codex app-server protocol; without Codex/MCP lower-level cancellation support, the safe external control is `turn/interrupt`, not per-tool termination
+Fix: Track live tool items from `item/started` and `item/completed`, exempt visible approval/user-input requests, treat bare `waitingOnApproval` without a surfaced request as a stale invisible wait, interrupt stale running turns after the watchdog threshold, and send a continuation prompt only after the interrupted turn settles
+Verification: `npm run test -- src/features/threads/hooks/useThreadsReducer.test.ts src/features/threads/hooks/useThreadItemEvents.test.ts src/features/threads/hooks/useThreadTurnEvents.test.tsx src/features/threads/hooks/useToolCallWatchdog.test.tsx`, `npm run typecheck`, live dev log showed `tool/watchdog timeout` with `staleHumanWaitFlags: ["waitingOnApproval"]`, followed by `tool/watchdog interrupt response`, `tool/watchdog auto-continue`, and a successful resumed turn
+Reuse hint: If a tool appears hung, do not try to fake per-MCP cancellation from CodexMonitor; track lifecycle events, pause only for visible human requests, interrupt stale invisible waits, then resume cleanly
+
+## [2026-05-04] Pinned thread order should persist separately from pin membership
+Context: CodexMonitor sidebar pinned conversations
+Signal: Pinned threads needed manual drag reordering that survives app restarts and cross-window storage reloads
+Root cause: The original pinned model stored only pin timestamps, so “is pinned” and “display order” were conflated into one value
+Fix: Keep pinned membership in `codexmonitor.pinnedThreads`, persist explicit order in `codexmonitor.pinnedThreadOrder`, normalize the order against current pins on load, and only allow drag reordering at the pinned root-group level
+Verification: `npm run test -- src/features/threads/utils/threadStorage.test.ts src/features/threads/hooks/useThreadStorage.test.tsx src/features/app/components/PinnedThreadList.test.tsx src/features/app/components/Sidebar.test.tsx`, `npm run typecheck`, and `git diff --check`
+Reuse hint: If a sidebar list needs manual user ordering plus durable membership state, store order and inclusion separately instead of overloading timestamps
+
+## [2026-05-05] Claude sessions can be surfaced as read-only threads inside existing workspaces
+Context: CodexMonitor multi-provider session browsing
+Signal: Claude support was needed without rewriting the app around provider-specific workspaces or live Claude orchestration
+Root cause: The existing app model is workspace-centric and Codex-specific, so synthetic Claude workspaces would have forced wide backend/frontend contract changes
+Fix: Discover Claude sessions from `~/.claude/projects/*/sessions-index.json`, match them to existing workspaces by path prefix, synthesize Codex-like thread/list and thread/read payloads in shared Rust cores, and treat Claude threads as read-only in the composer and thread menu UI
+Verification: `cd src-tauri && cargo check`, `npm run typecheck`, `npm run test`
+Reuse hint: If another provider needs transcript browsing first, add provider-aware thread summaries and synthetic thread payloads before inventing a parallel workspace model
+
+## [2026-05-05] Claude discovery must fall back to live JSONL when the index is stale
+Context: CodexMonitor Claude session discovery under `~/.claude/projects`
+Signal: The Claude filter showed `No Claude conversations found` even though local Claude JSONL transcripts existed for loaded workspaces
+Root cause: Discovery trusted `sessions-index.json` as the sole source of session metadata, but local Claude indexes can point at deleted or renamed JSONL files while valid transcript files still exist in the same project directory
+Fix: Read valid index entries first, then scan real `.jsonl` files in each Claude project directory and synthesize session summaries directly from transcript content when the index is missing or stale
+Verification: `cd src-tauri && cargo check`, `cd src-tauri && cargo test discovers_jsonl_sessions_when_index_is_stale -- --nocapture`, `npm run typecheck`, plus local confirmation that `~/.claude/projects/-Users-adamruehle-Development-mcp-testing/sessions-index.json` points at a missing `0cfaeb4b-...jsonl` while the real `aded6b7b-...jsonl` transcript contains `cwd=/Users/adamruehle/Development/mcp-testing`
+Reuse hint: If Claude sessions disappear again, compare `sessions-index.json` entries against actual `.jsonl` files before debugging workspace filtering or UI rendering
+
+## [2026-05-05] Provider filters must not depend on the recent-thread cap
+Context: CodexMonitor sidebar provider filtering for Claude threads inside workspace thread lists
+Signal: The Claude-only filter still showed `No Claude conversations found` after backend discovery was fixed
+Root cause: `buildWorkspaceThreadListState()` capped each workspace to the 20 most recent threads before the provider filter ran, so older Claude threads were trimmed out behind newer Codex threads and never reached `threadsByWorkspace`
+Fix: Preserve non-default provider summaries as anchors even when they fall outside the recent-thread cap, so provider filters operate on a representative list instead of an already-Codex-only slice
+Verification: `npm run test -- src/features/threads/utils/threadActionHelpers.test.ts src/features/threads/hooks/useThreadActions.test.tsx` and `npm run typecheck`; local evidence showed `/Users/adamruehle/Development/mcp-testing` had 108 Codex session files while the relevant Claude session dated to `2026-04-16T09:59:40Z`
+Reuse hint: If a provider-specific sidebar filter says nothing exists, inspect pre-filter list truncation before changing backend discovery or filter UI state
+
+## [2026-05-05] Claude session directories can hold the only surviving transcript data
+Context: CodexMonitor Claude discovery under `~/.claude/projects/<project>/`
+Signal: A workspace showed only one Claude conversation even though the project directory contained another session id plus many nested `subagents/*.jsonl` files
+Root cause: Some Claude sessions are stored as session-id directories with nested subagent JSONL files while the indexed top-level `fullPath` JSONL is missing, so flat project-root `*.jsonl` scanning misses those sessions entirely
+Fix: Discover Claude sessions from both direct project-root JSONL files and immediate session directories, recursively scan nested JSONL files inside those directories, and synthesize session summaries/thread reads from the collected records
+Verification: `cd src-tauri && cargo check`, `cd src-tauri && cargo test discovers_jsonl_sessions_when_index_is_stale -- --nocapture`, `cd src-tauri && cargo test discovers_sessions_from_nested_subagent_jsonl_when_main_file_is_missing -- --nocapture`; local evidence in `~/.claude/projects/-Users-adamruehle-Development-mcp-testing/` showed direct session `aded6b7b-...jsonl` plus missing-main session dir `0cfaeb4b-.../subagents/*.jsonl`
+Reuse hint: If Claude still appears to miss sessions after stale-index fallback, inspect whether the project directory contains session-id folders with nested `subagents` content instead of direct session files
+
+## [2026-05-05] Claude sidechain-only sessions should stay hidden from the sidebar
+Context: CodexMonitor Claude transcript discovery for user-facing conversation lists
+Signal: A discovered Claude session turned out to be only a compaction/summarization worker transcript and should not appear as a normal conversation
+Root cause: Recursive Claude discovery can find session-id directories whose only surviving records are `isSidechain: true` subagent JSONL files, which represent spawned worker activity rather than the main user conversation
+Fix: Keep recursive record collection for Claude session directories, but drop any discovered session whose collected records are entirely sidechain activity
+Verification: `cd src-tauri && cargo check`, `cd src-tauri && cargo test ignores_sidechain_only_session_directories -- --nocapture`, and local inspection of `~/.claude/projects/-Users-adamruehle-Development-mcp-testing/0cfaeb4b-.../subagents/*.jsonl` showing only `isSidechain: true` compaction prompts
+Reuse hint: If a Claude transcript looks like an internal worker or compaction job, check whether every record is sidechain activity before exposing it in the main conversation list
+
+## [2026-05-14] Tool action summaries should be inferred at render time
+Context: CodexMonitor command and tool-call transcript display
+Signal: Command rows exposed raw shell like `rg ...` or `nl ... | sed ...`, but sessions do not reliably store a canonical human-readable reason for each command
+Root cause: Codex protocol/session data has structured tool lifecycle fields, but per-command intent text is not consistently available and should not be invented as source-of-truth history
+Fix: Derive deterministic action summaries in the renderer from command/tool payloads, keep the exact raw command visible as secondary expandable detail, and fall back to `run` when no safe heuristic matches
+Verification: `npm run test`, `npm run typecheck`, targeted ESLint over touched message files, and `git diff --check`
+Reuse hint: For future tool display improvements, keep summaries labeled/treated as inferred UI affordances and preserve raw payload details for auditability
+
+## [2026-05-14] Workspace drag ordering should reuse workspace sortOrder
+Context: CodexMonitor sidebar workspace ordering
+Signal: Workspace cards needed pinned-thread-style drag reordering that persists across app restarts
+Root cause: Workspace settings already carry `sortOrder`, so adding a separate sidebar order store would create two competing sources of truth
+Fix: Reorder only root workspace cards in normal project view, persist the resulting order through `WorkspaceSettings.sortOrder`, and keep activity/thread-only modes controlled by their own sorters
+Verification: Focused Sidebar and workspace ordering tests passed, `npm run typecheck` passed, targeted ESLint passed, and `git diff --check` passed
+Reuse hint: For future workspace-order features, update existing `sortOrder` rather than adding localStorage-only sidebar state
+
+## [2026-05-14] Rename-thread modal must opt into an opaque surface
+Context: CodexMonitor design-system modal styling for the thread rename prompt
+Signal: The rename thread dialog appeared transparent even when app transparency was set to zero
+Root cause: `RenameThreadPrompt` reused the generic worktree modal shell, whose card background inherits `--surface-card-strong`; that token is intentionally translucent in normal themes
+Fix: Add a rename-specific modal class and force its DS modal card to `--surface-sidebar-opaque` while preserving the shared worktree modal layout
+Verification: `npm run test -- src/features/threads/components/RenameThreadPrompt.test.tsx`, `npm run typecheck`, and targeted `git diff --check`
+Reuse hint: If a modal must never show content through its card, give that dialog a specific class and override the card surface instead of changing global DS modal tokens
+
+## [2026-05-14] Hook rows must stay scoped to work groups
+Context: CodexMonitor work-group rendering for app-server hook events such as `postToolUse`
+Signal: Reopened or live threads showed `hook: postToolUse` rows floating between collapsed `Worked for ...` groups
+Root cause: `useThreadHookEvents()` ignored the event `turnId`, producing orphan hook tool rows, and older persisted orphan hooks could still render outside any turn segment
+Fix: Preserve the hook event `turnId` on new hook conversation items and fold legacy orphan hook entries into the nearest previous work group at render time
+Verification: `npm run test -- src/features/threads/hooks/useThreadHookEvents.test.ts src/features/messages/components/Messages.test.tsx`, `npm run typecheck`, and targeted `git diff --check`
+Reuse hint: If bookkeeping/tool rows float outside a collapsed turn, first verify they carry `turnId`; add render-time repair only for narrow legacy orphan cases

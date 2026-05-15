@@ -1340,6 +1340,71 @@ describe("Messages", () => {
     ).toBeNull();
   });
 
+  it("folds orphan hook rows into the nearest collapsed work group", () => {
+    const items: ConversationItem[] = [
+      {
+        id: "user-turn-hook",
+        kind: "message",
+        role: "user",
+        text: "set it up",
+        turnId: "turn-hook",
+        timestampMs: 1_000,
+      },
+      {
+        id: "tool-turn-hook",
+        kind: "tool",
+        toolType: "commandExecution",
+        title: "Command: npm install",
+        detail: "/tmp/codex",
+        status: "completed",
+        output: "installed",
+        turnId: "turn-hook",
+        timestampMs: 5_000,
+      },
+      {
+        id: "assistant-final-hook",
+        kind: "message",
+        role: "assistant",
+        text: "Setup complete.",
+        phase: "final_answer",
+        turnId: "turn-hook",
+        timestampMs: 9_000,
+      },
+      {
+        id: "hook-post-tool",
+        kind: "tool",
+        toolType: "hook",
+        title: "Hook: postToolUse",
+        detail: "command • sync • turn • codex • Processing Codex generated hook events",
+        status: "completed",
+        output: "",
+        durationMs: 0,
+      },
+    ];
+
+    render(
+      <Messages
+        items={items}
+        threadId="thread-1"
+        workspaceId="ws-1"
+        isThinking={false}
+        openTargets={[]}
+        selectedOpenAppId=""
+      />,
+    );
+
+    expect(screen.getByText("Setup complete.")).toBeTruthy();
+    expect(screen.getByText(/Worked for 8s/i)).toBeTruthy();
+    expect(screen.queryByText("hook:")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand work group" }));
+    expect(screen.getByText(/2 tool calls/i)).toBeTruthy();
+    expect(screen.queryByText("postToolUse")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand tool calls" }));
+    expect(screen.getByText("postToolUse")).toBeTruthy();
+  });
+
   it("prefers lifecycle duration for the latest completed work group", () => {
     const items: ConversationItem[] = [
       {

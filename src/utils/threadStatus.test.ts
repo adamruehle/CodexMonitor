@@ -32,8 +32,8 @@ describe("threadStatus", () => {
         isReviewing: true,
       }),
     ).toEqual({
-      statusLabel: "Reviewing",
-      stateClass: "is-reviewing",
+      statusLabel: "Idle",
+      stateClass: "is-idle",
       isRunning: false,
     });
 
@@ -50,7 +50,19 @@ describe("threadStatus", () => {
     });
   });
 
-  it("keeps running state when processing and reviewing are both true", () => {
+  it("shows active review state only while processing", () => {
+    expect(
+      getThreadStatusClass(
+        { isProcessing: false, hasUnread: false, isReviewing: true },
+        false,
+      ),
+    ).toBe("ready");
+    expect(
+      getThreadStatusClass(
+        { isProcessing: true, hasUnread: false, isReviewing: true },
+        false,
+      ),
+    ).toBe("reviewing");
     expect(
       getWorkspaceHomeThreadState({
         isProcessing: true,
@@ -58,8 +70,8 @@ describe("threadStatus", () => {
         isReviewing: true,
       }),
     ).toEqual({
-      statusLabel: "Running",
-      stateClass: "is-running",
+      statusLabel: "Reviewing",
+      stateClass: "is-reviewing",
       isRunning: true,
     });
   });

@@ -132,6 +132,58 @@ describe("useThreadItemEvents", () => {
     );
   });
 
+  it("tracks running tool calls from item lifecycle events", () => {
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(3000);
+    vi.mocked(buildConversationItem).mockReturnValue({
+      id: "tool-1",
+      kind: "tool",
+      toolType: "mcpToolCall",
+      title: "Tool: dope / get_service_skills",
+      detail: '{"team":"cmp"}',
+      status: "inProgress",
+      output: "",
+    });
+    const getActiveTurnId = vi.fn(() => "turn-1");
+    const { result, dispatch } = makeOptions({ getActiveTurnId });
+    const item: ItemPayload = {
+      type: "mcpToolCall",
+      id: "tool-1",
+      server: "dope",
+      tool: "get_service_skills",
+    };
+
+    act(() => {
+      result.current.onItemStarted("ws-1", "thread-1", item);
+    });
+
+    expect(dispatch).toHaveBeenCalledWith({
+      type: "markToolCallStarted",
+      toolCall: {
+        id: "tool-1",
+        workspaceId: "ws-1",
+        threadId: "thread-1",
+        turnId: "turn-1",
+        toolType: "mcpToolCall",
+        title: "Tool: dope / get_service_skills",
+        detail: '{"team":"cmp"}',
+        startedAt: 3000,
+        lastSeenAt: 3000,
+      },
+    });
+
+    act(() => {
+      result.current.onItemCompleted("ws-1", "thread-1", item);
+    });
+
+    expect(dispatch).toHaveBeenCalledWith({
+      type: "markToolCallCompleted",
+      threadId: "thread-1",
+      itemId: "tool-1",
+    });
+
+    nowSpy.mockRestore();
+  });
+
   it("marks review/processing false when review mode exits", () => {
     const { result, dispatch, markProcessing, markReviewing, safeMessageActivity } = makeOptions();
     const item: ItemPayload = { type: "exitedReviewMode", id: "review-1" };

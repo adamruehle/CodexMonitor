@@ -12,9 +12,11 @@ import type {
   ComposerSendIntent,
   ComposerEditorSettings,
   CustomPromptOption,
+  DebugEntry,
   DictationTranscript,
   FollowUpMessageBehavior,
   QueuedMessage,
+  SendMessageResult,
   ServiceTier,
   ThreadTokenUsage,
 } from "../../../types";
@@ -52,7 +54,7 @@ type ComposerProps = {
     images: string[],
     appMentions?: AppMention[],
     submitIntent?: ComposerSendIntent,
-  ) => void;
+  ) => void | SendMessageResult | Promise<void | SendMessageResult>;
   onStop: () => void;
   canStop: boolean;
   disabled?: boolean;
@@ -148,6 +150,7 @@ type ComposerProps = {
     onSelect: () => void | Promise<void>;
   }[];
   messageGroupControls?: MessageGroupControlsApi | null;
+  onDebug?: (entry: DebugEntry) => void;
 };
 
 const DEFAULT_EDITOR_SETTINGS: ComposerEditorSettings = {
@@ -160,6 +163,27 @@ const DEFAULT_EDITOR_SETTINGS: ComposerEditorSettings = {
   autoWrapPasteCodeLike: false,
   continueListOnShiftEnter: false,
 };
+
+function isSendResult(value: unknown): value is SendMessageResult {
+  if (value === null || value === undefined) {
+    return false;
+  }
+  return (
+    typeof value === "object" &&
+    "status" in value &&
+    typeof (value as { status?: unknown }).status === "string"
+  );
+}
+
+function isThenable<T>(value: T | PromiseLike<T>): value is PromiseLike<T> {
+  if (value === null || value === undefined) {
+    return false;
+  }
+  return (
+    (typeof value === "object" || typeof value === "function") &&
+    typeof (value as { then?: unknown }).then === "function"
+  );
+}
 
 export const Composer = memo(function Composer({
   onSend,
@@ -246,14 +270,15 @@ export const Composer = memo(function Composer({
   onFileAutocompleteActiveChange,
   contextActions = [],
   messageGroupControls = null,
+  onDebug,
 }: ComposerProps) {
   const [text, setText] = useState(draftText);
+  const [sendError, setSendError] = useState<string | null>(null);
   const [selectionStart, setSelectionStart] = useState<number | null>(null);
   const [appMentionBindings, setAppMentionBindings] = useState<AppMentionBinding[]>([]);
   const internalRef = useRef<HTMLTextAreaElement | null>(null);
   const textareaRef = externalTextareaRef ?? internalRef;
   const editorSettings = editorSettingsProp ?? DEFAULT_EDITOR_SETTINGS;
-  const isDictationBusy = dictationState !== "idle";
   const canSend = text.trim().length > 0 || attachedImages.length > 0;
   const isMac = isMacPlatform();
   const followUpShortcutLabel = isMac ? "Shift+Cmd+Enter" : "Shift+Ctrl+Enter";
@@ -286,6 +311,7 @@ export const Composer = memo(function Composer({
 
   const setComposerText = useCallback(
     (next: string) => {
+      setSendError(null);
       setText(next);
       onDraftChange?.(next);
     },
@@ -392,30 +418,163 @@ export const Composer = memo(function Composer({
     [handleHistoryTextChange, handleTextChange],
   );
 
+  const logComposerDecision = useCallback(
+    (
+      label: string,
+      payload: Record<string, unknown>,
+      source: DebugEntry["source"] = "client",
+    ) => {
+      onDebug?.({
+        id: `${Date.now()}-${label.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}`,
+        timestamp: Date.now(),
+        source,
+        label,
+        payload,
+      });
+    },
+    [onDebug],
+  );
+
   const handleSend = useCallback((submitIntent: ComposerSendIntent = "default") => {
     if (disabled) {
+      logComposerDecision(
+        "composer/local blocked",
+        {
+          reason: "disabled",
+          submitIntent,
+          textLength: text.trim().length,
+          imagesCount: attachedImages.length,
+          isProcessing,
+        },
+        "error",
+      );
       return;
     }
     const trimmed = text.trim();
     if (!trimmed && attachedImages.length === 0) {
+      logComposerDecision(
+        "composer/local blocked",
+        {
+          reason: "empty",
+          submitIntent,
+          textLength: 0,
+          imagesCount: 0,
+          isProcessing,
+        },
+        "error",
+      );
       return;
     }
-    if (trimmed) {
-      recordHistory(trimmed);
-    }
     const resolvedMentions = resolveBoundAppMentions(trimmed, appMentionBindings);
-    if (resolvedMentions.length > 0) {
-      onSend(trimmed, attachedImages, resolvedMentions, submitIntent);
-    } else {
-      onSend(trimmed, attachedImages, undefined, submitIntent);
+    const finishSend = (result: unknown) => {
+      if (
+        isSendResult(result) &&
+        (result.status === "blocked" || result.status === "steer_failed")
+      ) {
+        logComposerDecision(
+          "composer/local kept draft",
+          {
+            status: result.status,
+            message: result.message ?? null,
+            submitIntent,
+            textLength: trimmed.length,
+            imagesCount: attachedImages.length,
+            appMentionsCount: resolvedMentions.length,
+            isProcessing,
+          },
+          "error",
+        );
+        setSendError(
+          result.message ??
+            (result.status === "steer_failed"
+              ? "Codex could not steer the current turn."
+              : "Codex did not start this message."),
+        );
+        return;
+      }
+      logComposerDecision("composer/local cleared draft", {
+        status: isSendResult(result) ? result.status : "legacy-success",
+        submitIntent,
+        textLength: trimmed.length,
+        imagesCount: attachedImages.length,
+        appMentionsCount: resolvedMentions.length,
+        isProcessing,
+      });
+      if (trimmed) {
+        try {
+          recordHistory(trimmed);
+        } catch (error) {
+          logComposerDecision(
+            "composer/local history error",
+            {
+              submitIntent,
+              textLength: trimmed.length,
+              imagesCount: attachedImages.length,
+              appMentionsCount: resolvedMentions.length,
+              message: error instanceof Error ? error.message : String(error),
+              isProcessing,
+            },
+            "error",
+          );
+        }
+      }
+      resetHistoryNavigation();
+      setComposerText("");
+      setAppMentionBindings([]);
+    };
+    try {
+      setSendError(null);
+      logComposerDecision("composer/local submit", {
+        submitIntent,
+        textLength: trimmed.length,
+        imagesCount: attachedImages.length,
+        appMentionsCount: resolvedMentions.length,
+        isProcessing,
+      });
+      const result =
+        resolvedMentions.length > 0
+          ? onSend(trimmed, attachedImages, resolvedMentions, submitIntent)
+          : onSend(trimmed, attachedImages, undefined, submitIntent);
+      if (isThenable(result)) {
+        void result.then(finishSend).catch((error) => {
+          logComposerDecision(
+            "composer/local send error",
+            {
+              submitIntent,
+              textLength: trimmed.length,
+              imagesCount: attachedImages.length,
+              appMentionsCount: resolvedMentions.length,
+              message: error instanceof Error ? error.message : String(error),
+              isProcessing,
+            },
+            "error",
+          );
+          setSendError(error instanceof Error ? error.message : String(error));
+        });
+        return;
+      }
+      finishSend(result);
+    } catch (error) {
+      logComposerDecision(
+        "composer/local send error",
+        {
+          submitIntent,
+          textLength: trimmed.length,
+          imagesCount: attachedImages.length,
+          appMentionsCount: resolvedMentions.length,
+          message: error instanceof Error ? error.message : String(error),
+          isProcessing,
+        },
+        "error",
+      );
+      setSendError(error instanceof Error ? error.message : String(error));
     }
-    resetHistoryNavigation();
-    setComposerText("");
-    setAppMentionBindings([]);
   }, [
     appMentionBindings,
     attachedImages,
     disabled,
+    isProcessing,
+    logComposerDecision,
     onSend,
     recordHistory,
     resetHistoryNavigation,
@@ -565,7 +724,6 @@ export const Composer = memo(function Composer({
     handleHistoryKeyDown,
     handleInputKeyDown,
     handleSend,
-    isDictationBusy,
     isMac,
     onReviewPromptKeyDown,
     oppositeSubmitIntent,
@@ -585,6 +743,11 @@ export const Composer = memo(function Composer({
         onEditQueued={onEditQueued}
         onDeleteQueued={onDeleteQueued}
       />
+      {sendError && (
+        <div className="composer-send-error" role="status">
+          {sendError}
+        </div>
+      )}
       {isProcessing && composerFollowUpHintEnabled && (
         <div className="composer-followup-hint" role="status" aria-live="polite">
           <div className="composer-followup-title">Follow-up behavior</div>

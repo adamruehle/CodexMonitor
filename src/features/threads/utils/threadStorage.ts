@@ -3,6 +3,7 @@ import { repairMissingTimestamps, repairMissingTurnIds } from "@utils/threadItem
 
 const STORAGE_KEY_THREAD_ACTIVITY = "codexmonitor.threadLastUserActivity";
 export const STORAGE_KEY_PINNED_THREADS = "codexmonitor.pinnedThreads";
+export const STORAGE_KEY_PINNED_THREAD_ORDER = "codexmonitor.pinnedThreadOrder";
 export const STORAGE_KEY_CUSTOM_NAMES = "codexmonitor.threadCustomNames";
 export const STORAGE_KEY_THREAD_CODEX_PARAMS = "codexmonitor.threadCodexParams";
 export const STORAGE_KEY_DETACHED_REVIEW_LINKS = "codexmonitor.detachedReviewLinks";
@@ -11,6 +12,7 @@ export const MAX_PINS_SOFT_LIMIT = 5;
 
 export type ThreadActivityMap = Record<string, Record<string, number>>;
 export type PinnedThreadsMap = Record<string, number>;
+export type PinnedThreadOrder = string[];
 export type CustomNamesMap = Record<string, string>;
 type DetachedReviewLinksMap = Record<string, Record<string, string>>;
 export type ThreadItemsMap = Record<string, ConversationItem[]>;
@@ -168,6 +170,54 @@ export function loadPinnedThreads(): PinnedThreadsMap {
   }
 }
 
+export function loadPinnedThreadOrder(): PinnedThreadOrder {
+  if (typeof window === "undefined") {
+    return [];
+  }
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY_PINNED_THREAD_ORDER);
+    if (!raw) {
+      return [];
+    }
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed
+      .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
+      .filter((entry, index, array) => entry.length > 0 && array.indexOf(entry) === index);
+  } catch {
+    return [];
+  }
+}
+
+export function normalizePinnedThreadOrder(
+  pinned: PinnedThreadsMap,
+  order: PinnedThreadOrder,
+): PinnedThreadOrder {
+  const sortedPinnedKeys = Object.entries(pinned)
+    .sort(([aKey, aValue], [bKey, bValue]) => {
+      if (aValue === bValue) {
+        return aKey.localeCompare(bKey);
+      }
+      return aValue - bValue;
+    })
+    .map(([key]) => key);
+  const pinnedKeySet = new Set(sortedPinnedKeys);
+  const normalized = order.filter((key, index) => {
+    if (!pinnedKeySet.has(key)) {
+      return false;
+    }
+    return order.indexOf(key) === index;
+  });
+  sortedPinnedKeys.forEach((key) => {
+    if (!normalized.includes(key)) {
+      normalized.push(key);
+    }
+  });
+  return normalized;
+}
+
 export function savePinnedThreads(pinned: PinnedThreadsMap) {
   if (typeof window === "undefined") {
     return;
@@ -176,6 +226,20 @@ export function savePinnedThreads(pinned: PinnedThreadsMap) {
     window.localStorage.setItem(
       STORAGE_KEY_PINNED_THREADS,
       JSON.stringify(pinned),
+    );
+  } catch {
+    // Best-effort persistence; ignore write failures.
+  }
+}
+
+export function savePinnedThreadOrder(order: PinnedThreadOrder) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  try {
+    window.localStorage.setItem(
+      STORAGE_KEY_PINNED_THREAD_ORDER,
+      JSON.stringify(order),
     );
   } catch {
     // Best-effort persistence; ignore write failures.

@@ -162,6 +162,7 @@ export function buildResumeHydrationPlan({
   const threadName = !customName
     ? title || (preview ? previewThreadName(preview, "New Agent") : null)
     : null;
+  const reviewing = shouldMarkProcessing && isReviewingFromThread(thread);
   const lastAgentMessage = [...mergedItems]
     .reverse()
     .find(
@@ -179,7 +180,7 @@ export function buildResumeHydrationPlan({
     mergedItems,
     processingTimestamp,
     resumedActiveTurnId,
-    reviewing: isReviewingFromThread(thread),
+    reviewing,
     shouldHydrate: true,
     shouldMarkProcessing,
     threadName,
@@ -285,6 +286,15 @@ export function buildWorkspaceThreadListState({
   };
 
   appendFreshAnchor(activeThreadId);
+
+  uniqueThreads.forEach((thread) => {
+    const threadId = String(thread.id ?? "");
+    const provider = asString(thread.provider).trim().toLowerCase();
+    if (!threadId || !provider || provider === "codex") {
+      return;
+    }
+    appendFreshAnchor(threadId);
+  });
 
   const workspaceThreadIds = new Set<string>([
     ...Array.from(summaryById.keys()),

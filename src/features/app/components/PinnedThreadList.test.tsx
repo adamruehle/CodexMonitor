@@ -23,7 +23,7 @@ const nestedThread: ThreadSummary = {
 };
 
 const statusMap = {
-  "thread-1": { isProcessing: false, hasUnread: false, isReviewing: true },
+  "thread-1": { isProcessing: true, hasUnread: false, isReviewing: true },
   "thread-2": { isProcessing: true, hasUnread: false, isReviewing: false },
 };
 
@@ -118,7 +118,7 @@ describe("PinnedThreadList", () => {
         {...baseProps}
         rows={[{ thread: otherThread, depth: 0, workspaceId: "ws-2" }]}
         threadStatusById={{
-          "thread-1": { isProcessing: false, hasUnread: false, isReviewing: true },
+          "thread-1": { isProcessing: true, hasUnread: false, isReviewing: true },
           "thread-2": { isProcessing: true, hasUnread: false, isReviewing: false },
         }}
         pendingUserInputKeys={new Set(["ws-2:thread-2"])}
@@ -148,5 +148,64 @@ describe("PinnedThreadList", () => {
     expect(screen.queryByText("Pinned Nested")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Show sub-agents" }));
     expect(screen.getByText("Pinned Nested")).toBeTruthy();
+  });
+
+  it("reorders pinned root groups by drag and drop", () => {
+    const onReorderPinnedThread = vi.fn();
+
+    render(
+      <PinnedThreadList
+        {...baseProps}
+        canReorder
+        onReorderPinnedThread={onReorderPinnedThread}
+        rows={[
+          { thread, depth: 0, workspaceId: "ws-1" },
+          { thread: otherThread, depth: 0, workspaceId: "ws-2" },
+        ]}
+      />,
+    );
+
+    const dragRoot = screen
+      .getByText("Pinned Beta")
+      .closest(".pinned-thread-root");
+    const dropGroup = screen
+      .getByText("Pinned Alpha")
+      .closest(".pinned-thread-group");
+    expect(dragRoot).toBeTruthy();
+    expect(dropGroup).toBeTruthy();
+    if (!dragRoot || !dropGroup) {
+      throw new Error("Missing drag or drop target");
+    }
+
+    Object.defineProperty(dropGroup, "getBoundingClientRect", {
+      value: () => ({
+        top: 0,
+        bottom: 40,
+        height: 40,
+        left: 0,
+        right: 200,
+        width: 200,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      }),
+    });
+    const dataTransfer = {
+      effectAllowed: "",
+      dropEffect: "",
+      setData: vi.fn(),
+    };
+
+    fireEvent.dragStart(dragRoot, { dataTransfer });
+    fireEvent.dragOver(dropGroup, { dataTransfer, clientY: 36 });
+    fireEvent.drop(dropGroup, { dataTransfer, clientY: 36 });
+
+    expect(onReorderPinnedThread).toHaveBeenCalledWith(
+      "ws-2",
+      "thread-2",
+      "ws-1",
+      "thread-1",
+      "after",
+    );
   });
 });

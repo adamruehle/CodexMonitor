@@ -305,7 +305,7 @@ describe("useQueuedSend", () => {
     expect(options.sendUserMessage).not.toHaveBeenCalled();
 
     await act(async () => {
-      rerender({ ...options, isReviewing: true });
+      rerender({ ...options, isProcessing: true, isReviewing: true });
     });
     await act(async () => {
       await Promise.resolve();
@@ -314,7 +314,7 @@ describe("useQueuedSend", () => {
     expect(options.sendUserMessage).not.toHaveBeenCalled();
 
     await act(async () => {
-      rerender({ ...options, isReviewing: false });
+      rerender({ ...options, isProcessing: false, isReviewing: false });
     });
     await act(async () => {
       await Promise.resolve();
@@ -495,8 +495,13 @@ describe("useQueuedSend", () => {
     expect(options.startReview).not.toHaveBeenCalled();
   });
 
-  it("does not send when reviewing even if steer is enabled", async () => {
-    const options = makeOptions({ isReviewing: true, steerEnabled: true });
+  it("does not send when actively reviewing even if steer is enabled", async () => {
+    const options = makeOptions({
+      activeTurnId: "turn-1",
+      isProcessing: true,
+      isReviewing: true,
+      steerEnabled: true,
+    });
     const { result } = renderHook((props) => useQueuedSend(props), {
       initialProps: options,
     });
@@ -507,6 +512,24 @@ describe("useQueuedSend", () => {
 
     expect(options.sendUserMessage).not.toHaveBeenCalled();
     expect(result.current.activeQueue).toHaveLength(0);
+  });
+
+  it("does not let a stale review flag block an idle send", async () => {
+    const options = makeOptions({ isProcessing: false, isReviewing: true });
+    const { result } = renderHook((props) => useQueuedSend(props), {
+      initialProps: options,
+    });
+
+    await act(async () => {
+      await result.current.handleSend("Send despite stale review");
+    });
+
+    expect(options.sendUserMessage).toHaveBeenCalledWith(
+      "Send despite stale review",
+      [],
+      undefined,
+      { sendIntent: "default" },
+    );
   });
 
   it("preserves images for queued messages", async () => {

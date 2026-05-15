@@ -166,6 +166,7 @@ describe("threadReducer", () => {
             isReviewing: false,
             processingStartedAt: null,
             lastDurationMs: null,
+            activeFlags: [],
           },
         },
       },
@@ -196,6 +197,7 @@ describe("threadReducer", () => {
             isReviewing: false,
             processingStartedAt: 1000,
             lastDurationMs: null,
+            activeFlags: [],
           },
         },
       },
@@ -227,6 +229,7 @@ describe("threadReducer", () => {
           isReviewing: true,
           processingStartedAt: null,
           lastDurationMs: 300,
+          activeFlags: [],
         },
       },
     };
@@ -244,6 +247,83 @@ describe("threadReducer", () => {
       isReviewing: true,
     });
     expect(reviewing).toBe(base);
+  });
+
+  it("clears review state when processing completes", () => {
+    const processingReview = threadReducer(initialState, {
+      type: "markReviewing",
+      threadId: "thread-1",
+      isReviewing: true,
+    });
+    const runningReview = threadReducer(processingReview, {
+      type: "markProcessing",
+      threadId: "thread-1",
+      isProcessing: true,
+      timestamp: 1000,
+    });
+
+    const completed = threadReducer(runningReview, {
+      type: "markProcessing",
+      threadId: "thread-1",
+      isProcessing: false,
+      timestamp: 1500,
+    });
+
+    expect(completed.threadStatusById["thread-1"]).toEqual({
+      isProcessing: false,
+      hasUnread: false,
+      isReviewing: false,
+      processingStartedAt: null,
+      lastDurationMs: 500,
+      activeFlags: [],
+    });
+  });
+
+  it("tracks active thread status flags", () => {
+    const flagged = threadReducer(initialState, {
+      type: "setThreadActiveFlags",
+      threadId: "thread-1",
+      activeFlags: ["waitingOnApproval"],
+    });
+
+    expect(flagged.threadStatusById["thread-1"]?.activeFlags).toEqual([
+      "waitingOnApproval",
+    ]);
+    expect(
+      threadReducer(flagged, {
+        type: "setThreadActiveFlags",
+        threadId: "thread-1",
+        activeFlags: ["waitingOnApproval"],
+      }),
+    ).toBe(flagged);
+  });
+
+  it("tracks and clears running tool calls", () => {
+    const started = threadReducer(initialState, {
+      type: "markToolCallStarted",
+      toolCall: {
+        id: "tool-1",
+        workspaceId: "ws-1",
+        threadId: "thread-1",
+        turnId: "turn-1",
+        toolType: "mcpToolCall",
+        title: "Tool: dope / get_service_skills",
+        detail: "{}",
+        startedAt: 1000,
+        lastSeenAt: 1000,
+      },
+    });
+
+    expect(started.runningToolCallsByThread["thread-1"]?.["tool-1"]?.title).toBe(
+      "Tool: dope / get_service_skills",
+    );
+
+    const completed = threadReducer(started, {
+      type: "markToolCallCompleted",
+      threadId: "thread-1",
+      itemId: "tool-1",
+    });
+    expect(completed.runningToolCallsByThread["thread-1"]).toBeUndefined();
   });
 
   it("tracks request user input queue", () => {
@@ -612,6 +692,7 @@ describe("threadReducer", () => {
           isReviewing: false,
           processingStartedAt: null,
           lastDurationMs: null,
+          activeFlags: [],
         },
       },
       lastAgentMessageByThread: {
@@ -679,6 +760,7 @@ describe("threadReducer", () => {
           isReviewing: false,
           processingStartedAt: null,
           lastDurationMs: null,
+          activeFlags: [],
         },
       },
     };

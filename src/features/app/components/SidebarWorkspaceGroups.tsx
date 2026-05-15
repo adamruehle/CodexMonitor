@@ -1,5 +1,11 @@
 import { createPortal } from "react-dom";
-import type { MouseEvent, MutableRefObject, ReactNode } from "react";
+import { useState } from "react";
+import type {
+  DragEvent,
+  MouseEvent,
+  MutableRefObject,
+  ReactNode,
+} from "react";
 import Copy from "lucide-react/dist/esm/icons/copy";
 import GitBranch from "lucide-react/dist/esm/icons/git-branch";
 import Plus from "lucide-react/dist/esm/icons/plus";
@@ -28,6 +34,12 @@ type SidebarWorkspaceGroupsProps = {
   collapsedGroups: Set<string>;
   ungroupedCollapseId: string;
   toggleGroupCollapse: (groupId: string) => void;
+  canReorderWorkspaces: boolean;
+  onReorderWorkspace: (
+    sourceWorkspaceId: string,
+    targetWorkspaceId: string,
+    position: "before" | "after",
+  ) => void;
   cloneChildIds: Set<string>;
   clonesBySource: Map<string, WorkspaceInfo[]>;
   worktreesByParent: Map<string, WorkspaceInfo[]>;
@@ -91,6 +103,8 @@ type SidebarWorkspaceEntryProps = Omit<
   | "collapsedGroups"
   | "ungroupedCollapseId"
   | "toggleGroupCollapse"
+  | "canReorderWorkspaces"
+  | "onReorderWorkspace"
 > & {
   workspace: WorkspaceInfo;
 };
@@ -383,12 +397,113 @@ export function SidebarWorkspaceGroups({
   collapsedGroups,
   ungroupedCollapseId,
   toggleGroupCollapse,
+  canReorderWorkspaces,
+  onReorderWorkspace,
   ...entryProps
 }: SidebarWorkspaceGroupsProps) {
+  const [draggingWorkspace, setDraggingWorkspace] = useState<{
+    workspaceId: string;
+    groupId: string | null;
+  } | null>(null);
+  const [dropTarget, setDropTarget] = useState<{
+    workspaceId: string;
+    position: "before" | "after";
+  } | null>(null);
+
+  const handleDragStart = (
+    event: DragEvent<HTMLDivElement>,
+    workspaceId: string,
+    groupId: string | null,
+  ) => {
+    if (!canReorderWorkspaces) {
+      return;
+    }
+    event.stopPropagation();
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("application/x-codexmonitor-workspace-id", workspaceId);
+    event.dataTransfer.setData("text/plain", workspaceId);
+    setDraggingWorkspace({ workspaceId, groupId });
+    setDropTarget(null);
+  };
+
+  const handleDragEnd = () => {
+    setDraggingWorkspace(null);
+    setDropTarget(null);
+  };
+
+  const handleDragOver = (
+    event: DragEvent<HTMLDivElement>,
+    workspaceId: string,
+    groupId: string | null,
+  ) => {
+    if (
+      !canReorderWorkspaces ||
+      !draggingWorkspace ||
+      draggingWorkspace.groupId !== groupId ||
+      draggingWorkspace.workspaceId === workspaceId
+    ) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = "move";
+    const rect = event.currentTarget.getBoundingClientRect();
+    const clientY =
+      typeof event.clientY === "number" && Number.isFinite(event.clientY)
+        ? event.clientY
+        : rect.top;
+    const position =
+      clientY <= rect.top + rect.height / 2 ? "before" : "after";
+    setDropTarget((current) => {
+      if (current?.workspaceId === workspaceId && current.position === position) {
+        return current;
+      }
+      return { workspaceId, position };
+    });
+  };
+
+  const handleDragLeave = (event: DragEvent<HTMLDivElement>, workspaceId: string) => {
+    const relatedTarget = event.relatedTarget as Node | null;
+    if (relatedTarget && event.currentTarget.contains(relatedTarget)) {
+      return;
+    }
+    setDropTarget((current) =>
+      current?.workspaceId === workspaceId ? null : current,
+    );
+  };
+
+  const handleDrop = (
+    event: DragEvent<HTMLDivElement>,
+    targetWorkspaceId: string,
+    groupId: string | null,
+  ) => {
+    if (
+      !canReorderWorkspaces ||
+      !draggingWorkspace ||
+      draggingWorkspace.groupId !== groupId ||
+      draggingWorkspace.workspaceId === targetWorkspaceId
+    ) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    const position =
+      dropTarget?.workspaceId === targetWorkspaceId
+        ? dropTarget.position
+        : "before";
+    onReorderWorkspace(draggingWorkspace.workspaceId, targetWorkspaceId, position);
+    handleDragEnd();
+  };
+
   return groups.map((group) => {
     const showGroupHeader = Boolean(group.id) || hasWorkspaceGroups;
     const toggleId = group.id ?? (showGroupHeader ? ungroupedCollapseId : null);
     const isGroupCollapsed = Boolean(toggleId && collapsedGroups.has(toggleId));
+    const reorderableWorkspaces = group.workspaces.filter(
+      (workspace) => !entryProps.cloneChildIds.has(workspace.id),
+    );
+    const canReorderGroup =
+      canReorderWorkspaces && reorderableWorkspaces.length > 1;
 
     return (
       <WorkspaceGroup
@@ -399,13 +514,37 @@ export function SidebarWorkspaceGroups({
         isCollapsed={isGroupCollapsed}
         onToggleCollapse={toggleGroupCollapse}
       >
-        {group.workspaces.map((workspace) => (
-          <SidebarWorkspaceEntry
-            key={workspace.id}
-            workspace={workspace}
-            {...entryProps}
-          />
-        ))}
+        {group.workspaces.map((workspace) => {
+          if (entryProps.cloneChildIds.has(workspace.id)) {
+            return null;
+          }
+          const isDragSource =
+            draggingWorkspace?.workspaceId === workspace.id &&
+            draggingWorkspace.groupId === group.id;
+          const dropPosition =
+            dropTarget?.workspaceId === workspace.id ? dropTarget.position : null;
+          return (
+            <div
+              key={workspace.id}
+              className={`workspace-reorder-item${
+                canReorderGroup ? " is-reorderable" : ""
+              }${isDragSource ? " is-dragging" : ""}${
+                dropPosition ? ` drop-${dropPosition}` : ""
+              }`}
+              draggable={canReorderGroup}
+              onDragStart={(event) => handleDragStart(event, workspace.id, group.id)}
+              onDragEnd={handleDragEnd}
+              onDragOver={(event) => handleDragOver(event, workspace.id, group.id)}
+              onDragLeave={(event) => handleDragLeave(event, workspace.id)}
+              onDrop={(event) => handleDrop(event, workspace.id, group.id)}
+            >
+              <SidebarWorkspaceEntry
+                workspace={workspace}
+                {...entryProps}
+              />
+            </div>
+          );
+        })}
       </WorkspaceGroup>
     );
   });

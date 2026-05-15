@@ -85,4 +85,83 @@ describe("useAgentSystemNotifications", () => {
       },
     });
   });
+
+  it("does not notify when an intermediary agent message completes", async () => {
+    renderHook(() =>
+      useAgentSystemNotifications({
+        enabled: true,
+        isWindowFocused: false,
+        minDurationMs: 0,
+      }),
+    );
+
+    const handlers = useAppServerEventsMock.mock.calls[
+      useAppServerEventsMock.mock.calls.length - 1
+    ]?.[0] as {
+      onTurnStarted?: (workspaceId: string, threadId: string, turnId: string) => void;
+      onAgentMessageCompleted?: (event: {
+        workspaceId: string;
+        threadId: string;
+        text: string;
+      }) => void;
+      onTurnCompleted?: (workspaceId: string, threadId: string, turnId: string) => void;
+    };
+
+    act(() => {
+      handlers.onTurnStarted?.("ws-1", "thread-1", "turn-1");
+      handlers.onAgentMessageCompleted?.({
+        workspaceId: "ws-1",
+        threadId: "thread-1",
+        text: "Still working.",
+      });
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(sendNotification).not.toHaveBeenCalled();
+
+    act(() => {
+      handlers.onTurnCompleted?.("ws-1", "thread-1", "turn-1");
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(sendNotification).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(sendNotification).mock.calls[0]?.[1]).toBe("Still working.");
+  });
+
+  it("dedupes repeated terminal completion after late item events", async () => {
+    renderHook(() =>
+      useAgentSystemNotifications({
+        enabled: true,
+        isWindowFocused: false,
+        minDurationMs: 0,
+      }),
+    );
+
+    const handlers = useAppServerEventsMock.mock.calls[
+      useAppServerEventsMock.mock.calls.length - 1
+    ]?.[0] as {
+      onTurnStarted?: (workspaceId: string, threadId: string, turnId: string) => void;
+      onItemStarted?: (workspaceId: string, threadId: string) => void;
+      onTurnCompleted?: (workspaceId: string, threadId: string, turnId: string) => void;
+    };
+
+    act(() => {
+      handlers.onTurnStarted?.("ws-1", "thread-1", "turn-1");
+      handlers.onTurnCompleted?.("ws-1", "thread-1", "turn-1");
+      handlers.onItemStarted?.("ws-1", "thread-1");
+      handlers.onTurnCompleted?.("ws-1", "thread-1", "turn-1");
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(sendNotification).toHaveBeenCalledTimes(1);
+  });
 });

@@ -768,17 +768,14 @@ export const ToolRow = memo(function ToolRow({
     ? changeNames.length > 1
       ? "files edited"
       : "file edited"
-    : isCommand
-      ? ""
-      : summary.label;
+    : summary.label;
   const inlineStatus = formatToolStatusLabel(item);
   const summaryValue = isFileChange
     ? changeNames.length > 1
       ? `${changeNames[0]} +${changeNames.length - 1}`
       : changeNames[0] || "changes"
     : summary.value;
-  const shouldFadeCommand =
-    isCommand && !isExpanded && (summaryValue?.length ?? 0) > 80;
+  const rawCommand = isCommand ? summary.rawCommand || commandText : "";
   const showToolOutput = isExpanded && (!isFileChange || !hasChanges);
   const normalizedStatus = (item.status ?? "").toLowerCase();
   const isCommandRunning = isCommand && /in[_\s-]*progress|running|started/.test(normalizedStatus);
@@ -858,29 +855,27 @@ export const ToolRow = memo(function ToolRow({
           )}
           {summaryValue && (
             <span
-              className={`tool-inline-value ${isCommand ? "tool-inline-command" : ""} ${
-                isCommand && isExpanded ? "tool-inline-command-full" : ""
-              }`}
+              className="tool-inline-value"
             >
-              {isCommand ? (
-                <span
-                  className={`tool-inline-command-text ${
-                    shouldFadeCommand ? "tool-inline-command-fade" : ""
-                  }`}
-                >
-                  {summaryValue}
-                </span>
-              ) : (
-                summaryValue
-              )}
+              {summaryValue}
             </span>
           )}
           {inlineStatus && (
             <span className="tool-inline-status">{inlineStatus}</span>
           )}
         </button>
-        {isExpanded && summary.detail && !isFileChange && (
+        {isExpanded && summary.detail && !isFileChange && !isCommand && (
           <div className="tool-inline-detail">{summary.detail}</div>
+        )}
+        {isCommand && rawCommand && (
+          <div
+            className={`tool-inline-command-detail ${
+              isExpanded ? "tool-inline-command-detail-expanded" : ""
+            }`}
+          >
+            <span className="tool-inline-command-detail-label">command</span>
+            <code>{rawCommand}</code>
+          </div>
         )}
         {isExpanded && isCommand && item.detail && (
           <div className="tool-inline-detail tool-inline-muted">

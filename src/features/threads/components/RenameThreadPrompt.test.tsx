@@ -17,6 +17,8 @@ describe("RenameThreadPrompt", () => {
       />,
     );
 
+    expect(container.querySelector(".rename-thread-modal")).toBeTruthy();
+
     const input = screen.getByLabelText("New name");
     fireEvent.keyDown(input, { key: "Escape" });
     fireEvent.keyDown(input, { key: "Enter" });

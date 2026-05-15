@@ -179,9 +179,10 @@ export function useMainAppComposerWorkspaceState({
   const isProcessing =
     (activeThreadId ? threadStatusById[activeThreadId]?.isProcessing ?? false : false) ||
     isStartingDraftThread;
-  const isReviewing = activeThreadId
+  const rawIsReviewing = activeThreadId
     ? threadStatusById[activeThreadId]?.isReviewing ?? false
     : false;
+  const isReviewing = isProcessing && rawIsReviewing;
   const activeTurnId = activeThreadId ? activeTurnIdByThread[activeThreadId] ?? null : null;
   const steerAvailable = settings.steerEnabled && Boolean(activeTurnId);
   const hasUserInputRequestForActiveThread = Boolean(
@@ -221,6 +222,17 @@ export function useMainAppComposerWorkspaceState({
       : queueFlushPaused && isPlanReadyAwaitingResponse
         ? "Paused — waiting for plan accept/changes."
         : null;
+  const activeThreadSummary = useMemo(() => {
+    if (!activeWorkspaceId || !activeThreadId) {
+      return null;
+    }
+    return (
+      (threadsByWorkspace[activeWorkspaceId] ?? []).find(
+        (threadSummary) => threadSummary.id === activeThreadId,
+      ) ?? null
+    );
+  }, [activeThreadId, activeWorkspaceId, threadsByWorkspace]);
+  const isReadOnlyThread = activeThreadSummary?.provider === "claude";
 
   const composerState = useComposerController({
     activeThreadId,
@@ -245,6 +257,7 @@ export function useMainAppComposerWorkspaceState({
     startMcp,
     startFast,
     startStatus,
+    onDebug: addDebugEntry,
   });
 
   const workspaceHomeState = useWorkspaceHome({
@@ -264,7 +277,7 @@ export function useMainAppComposerWorkspaceState({
 
   const canInsertComposerText = showWorkspaceHome
     ? Boolean(activeWorkspace)
-    : Boolean(activeThreadId);
+    : Boolean(activeThreadId && !isReadOnlyThread);
   const handleInsertComposerText = useComposerInsert({
     isEnabled: canInsertComposerText,
     draftText: showWorkspaceHome ? workspaceHomeState.draft : composerState.activeDraft,
@@ -316,6 +329,7 @@ export function useMainAppComposerWorkspaceState({
     canInterrupt,
     isProcessing,
     isReviewing,
+    isReadOnlyThread,
     activeTurnId,
     steerAvailable,
     queuePausedReason,

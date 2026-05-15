@@ -20,7 +20,6 @@ type UseComposerKeyDownArgs = {
   handleHistoryKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
   handleInputKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
   handleSend: (submitIntent?: ComposerSendIntent) => void;
-  isDictationBusy: boolean;
   isMac: boolean;
   onReviewPromptKeyDown?: (event: ReviewPromptKeyEvent) => boolean;
   oppositeSubmitIntent: ComposerSendIntent;
@@ -41,7 +40,6 @@ export function useComposerKeyDown({
   handleHistoryKeyDown,
   handleInputKeyDown,
   handleSend,
-  isDictationBusy,
   isMac,
   onReviewPromptKeyDown,
   oppositeSubmitIntent,
@@ -65,10 +63,6 @@ export function useComposerKeyDown({
         event.shiftKey &&
         (isMac ? event.metaKey : event.ctrlKey);
       if (isOppositeFollowUpShortcut && !suggestionsOpen) {
-        if (isDictationBusy) {
-          event.preventDefault();
-          return;
-        }
         event.preventDefault();
         const dismissKeyboardAfterSend = canSend && isMobilePlatform();
         handleSend(oppositeSubmitIntent);
@@ -156,10 +150,6 @@ export function useComposerKeyDown({
             }
           }
         }
-        if (isDictationBusy) {
-          event.preventDefault();
-          return;
-        }
         event.preventDefault();
         const dismissKeyboardAfterSend = canSend && isMobilePlatform();
         handleSend(defaultSubmitIntent);
@@ -178,7 +168,6 @@ export function useComposerKeyDown({
       handleHistoryKeyDown,
       handleInputKeyDown,
       handleSend,
-      isDictationBusy,
       isMac,
       onReviewPromptKeyDown,
       oppositeSubmitIntent,

@@ -325,8 +325,8 @@ describe("useThreadUiOrchestration", () => {
       pendingNewThreadSeedRef: {
         current: null,
       } as MutableRefObject<PendingNewThreadSeed | null>,
-      runWithDraftStart: vi.fn(async (runner: () => Promise<void>) => runner()),
-      handleComposerSend: vi.fn(async () => undefined),
+      runWithDraftStart: async <T,>(runner: () => Promise<T>): Promise<T> => runner(),
+      handleComposerSend: vi.fn(async () => ({ status: "sent" as const })),
       clearDraftState: vi.fn(),
       exitDiffView: vi.fn(),
       resetPullRequestSelection: vi.fn(),

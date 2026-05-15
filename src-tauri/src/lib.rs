@@ -9,6 +9,7 @@ use tauri::WindowEvent;
 mod backend;
 mod codex;
 mod daemon_binary;
+mod dev_log;
 mod dictation;
 mod event_sink;
 mod files;
@@ -61,6 +62,18 @@ async fn stop_managed_daemons_for_exit(app_handle: tauri::AppHandle) {
     let _ = tailscale::tailscale_daemon_stop(state).await;
 }
 
+#[cfg(desktop)]
+fn request_app_exit(app_handle: tauri::AppHandle) {
+    if EXIT_CLEANUP_IN_PROGRESS.swap(true, Ordering::SeqCst) {
+        app_handle.exit(0);
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        stop_managed_daemons_for_exit(app_handle.clone()).await;
+        app_handle.exit(0);
+    });
+}
+
 #[tauri::command]
 fn is_mobile_runtime() -> bool {
     cfg!(any(target_os = "ios", target_os = "android"))
@@ -110,7 +123,12 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
-                let _ = window.hide();
+                let app_handle = window.app_handle().clone();
+                if keep_daemon_running_after_close(&app_handle) {
+                    let _ = window.hide();
+                } else {
+                    request_app_exit(app_handle);
+                }
             }
         })
         .setup(|app| {
@@ -304,6 +322,7 @@ pub fn run() {
             tailscale::tailscale_daemon_start,
             tailscale::tailscale_daemon_stop,
             tailscale::tailscale_daemon_status,
+            dev_log::append_dev_log,
             is_mobile_runtime
         ])
         .build(tauri::generate_context!())
@@ -316,12 +335,7 @@ pub fn run() {
                 && !keep_daemon_running_after_close(app_handle)
             {
                 api.prevent_exit();
-                EXIT_CLEANUP_IN_PROGRESS.store(true, Ordering::SeqCst);
-                let app_handle = app_handle.clone();
-                tauri::async_runtime::spawn(async move {
-                    stop_managed_daemons_for_exit(app_handle.clone()).await;
-                    app_handle.exit(0);
-                });
+                request_app_exit(app_handle.clone());
             }
             return;
         }

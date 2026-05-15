@@ -88,11 +88,12 @@ export function useNewAgentDraft({
   );
 
   const runWithDraftStart = useCallback(
-    async (runner: () => Promise<void>) => {
+    async <T,>(runner: () => Promise<T>): Promise<T> => {
       const shouldMarkStarting = Boolean(activeWorkspace && !activeThreadId);
       const draftWorkspaceId = activeWorkspace?.id ?? null;
       if (shouldMarkStarting && draftWorkspaceId) {
         const previous = draftStartChainByWorkspaceRef.current[draftWorkspaceId] ?? Promise.resolve();
+        let chainPromise: Promise<void> | null = null;
         const current = previous
           .catch(() => {
             // Keep the chain alive even if a previous send fails.
@@ -100,7 +101,7 @@ export function useNewAgentDraft({
           .then(async () => {
             setStartingDraftThreadWorkspaceId(draftWorkspaceId);
             try {
-              await runner();
+              const result = await runner();
               clearStartingTimeout();
               clearStartingTimeoutRef.current = window.setTimeout(() => {
                 clearStartingTimeoutRef.current = null;
@@ -108,6 +109,7 @@ export function useNewAgentDraft({
                   value === draftWorkspaceId ? null : value,
                 );
               }, STARTING_DRAFT_FALLBACK_MS);
+              return result;
             } catch (error) {
               clearStartingTimeout();
               setStartingDraftThreadWorkspaceId((value) =>
@@ -117,16 +119,22 @@ export function useNewAgentDraft({
             }
           })
           .finally(() => {
-            if (draftStartChainByWorkspaceRef.current[draftWorkspaceId] === current) {
+            if (
+              chainPromise &&
+              draftStartChainByWorkspaceRef.current[draftWorkspaceId] === chainPromise
+            ) {
               delete draftStartChainByWorkspaceRef.current[draftWorkspaceId];
             }
           });
-        draftStartChainByWorkspaceRef.current[draftWorkspaceId] = current;
-        await current;
-        return;
+        chainPromise = current.then(
+          () => undefined,
+          () => undefined,
+        );
+        draftStartChainByWorkspaceRef.current[draftWorkspaceId] = chainPromise;
+        return await current;
       }
 
-      await runner();
+      return await runner();
     },
     [activeThreadId, activeWorkspace, clearStartingTimeout],
   );

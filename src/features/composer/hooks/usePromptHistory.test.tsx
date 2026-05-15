@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act, renderHook } from "@testing-library/react";
 import { useRef, useState } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { usePromptHistory } from "./usePromptHistory";
 
 const STORAGE_PREFIX = "codexmonitor.promptHistory.";
@@ -28,6 +28,12 @@ function createKeyEvent(key: "ArrowUp" | "ArrowDown") {
 }
 
 describe("usePromptHistory", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    globalThis.localStorage.clear();
+  });
+
   it("stores and recalls history per workspace key", () => {
     globalThis.localStorage.clear();
     vi.useFakeTimers();
@@ -125,6 +131,39 @@ describe("usePromptHistory", () => {
     expect(globalThis.localStorage.getItem(getStorageKey("ws-b"))).toBe(
       JSON.stringify(["beta prompt"]),
     );
+
+    unmount();
+    textarea.remove();
+  });
+
+  it("does not throw when browser storage is full", () => {
+    globalThis.localStorage.clear();
+    vi.spyOn(globalThis.localStorage, "setItem").mockImplementation(() => {
+      throw new DOMException("The quota has been exceeded.", "QuotaExceededError");
+    });
+    const textarea = document.createElement("textarea");
+    document.body.appendChild(textarea);
+
+    const { result, unmount } = renderHook(() => {
+      const [text, setText] = useState("");
+      const [, setSelectionStart] = useState<number | null>(null);
+      const textareaRef = useRef<HTMLTextAreaElement | null>(textarea);
+      return usePromptHistory({
+        historyKey: "ws-quota",
+        text,
+        disabled: false,
+        isAutocompleteOpen: false,
+        textareaRef,
+        setText,
+        setSelectionStart,
+      });
+    });
+
+    expect(() => {
+      act(() => {
+        result.current.recordHistory("quota-safe prompt");
+      });
+    }).not.toThrow();
 
     unmount();
     textarea.remove();

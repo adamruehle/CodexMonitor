@@ -8,7 +8,11 @@ import ListTree from "lucide-react/dist/esm/icons/list-tree";
 import RefreshCw from "lucide-react/dist/esm/icons/refresh-cw";
 import Search from "lucide-react/dist/esm/icons/search";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { ThreadListOrganizeMode, ThreadListSortKey } from "../../../types";
+import type {
+  ThreadListOrganizeMode,
+  ThreadListSortKey,
+  ThreadProviderFilter,
+} from "../../../types";
 import {
   MenuTrigger,
   PopoverMenuItem,
@@ -25,6 +29,8 @@ type SidebarHeaderProps = {
   onSetThreadListSortKey: (sortKey: ThreadListSortKey) => void;
   threadListOrganizeMode: ThreadListOrganizeMode;
   onSetThreadListOrganizeMode: (organizeMode: ThreadListOrganizeMode) => void;
+  threadProviderFilter?: ThreadProviderFilter;
+  onSetThreadProviderFilter?: (filter: ThreadProviderFilter) => void;
   onRefreshAllThreads: () => void;
   refreshDisabled?: boolean;
   refreshInProgress?: boolean;
@@ -39,6 +45,8 @@ export function SidebarHeader({
   onSetThreadListSortKey,
   threadListOrganizeMode,
   onSetThreadListOrganizeMode,
+  threadProviderFilter = "all",
+  onSetThreadProviderFilter,
   onRefreshAllThreads,
   refreshDisabled = false,
   refreshInProgress = false,
@@ -145,6 +153,28 @@ export function SidebarHeader({
           >
             Projects
           </button>
+        </div>
+        <div className="sidebar-provider-toggle" role="tablist" aria-label="Thread provider filter">
+          {(
+            [
+              ["all", "All"],
+              ["codex", "Codex"],
+              ["claude", "Claude"],
+            ] as const
+          ).map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              className={`sidebar-provider-option${
+                threadProviderFilter === value ? " is-active" : ""
+              }`}
+              onClick={() => onSetThreadProviderFilter?.(value)}
+              data-tauri-drag-region="false"
+              aria-pressed={threadProviderFilter === value}
+            >
+              {label}
+            </button>
+          ))}
         </div>
       </div>
       <div className="sidebar-header-actions">

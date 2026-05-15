@@ -2,6 +2,7 @@ import { useCallback, useMemo, useState } from "react";
 import type {
   AppMention,
   ComposerSendIntent,
+  DebugEntry,
   FollowUpMessageBehavior,
   QueuedMessage,
   SendMessageResult,
@@ -33,6 +34,7 @@ export function useComposerController({
   startMcp,
   startFast,
   startStatus,
+  onDebug,
 }: {
   activeThreadId: string | null;
   activeTurnId: string | null;
@@ -54,7 +56,7 @@ export function useComposerController({
     images?: string[],
     appMentions?: AppMention[],
     options?: { sendIntent?: ComposerSendIntent },
-  ) => Promise<{ status: "sent" | "blocked" | "steer_failed" }>;
+  ) => Promise<SendMessageResult>;
   sendUserMessageToThread: (
     workspace: WorkspaceInfo,
     threadId: string,
@@ -69,6 +71,7 @@ export function useComposerController({
   startMcp: (text: string) => Promise<void>;
   startFast: (text: string) => Promise<void>;
   startStatus: (text: string) => Promise<void>;
+  onDebug?: (entry: DebugEntry) => void;
 }) {
   const [composerDraftsByThread, setComposerDraftsByThread] = useState<
     Record<string, string>
@@ -116,6 +119,7 @@ export function useComposerController({
     startFast,
     startStatus,
     clearActiveImages,
+    onDebug,
   });
 
   const activeDraft = useMemo(

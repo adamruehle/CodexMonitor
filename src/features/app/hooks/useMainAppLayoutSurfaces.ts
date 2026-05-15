@@ -1,5 +1,10 @@
 import type { RefObject } from "react";
-import type { AppSettings, ComposerEditorSettings, WorkspaceInfo } from "@/types";
+import type {
+  AppSettings,
+  ComposerEditorSettings,
+  DebugEntry,
+  WorkspaceInfo,
+} from "@/types";
 import type { MessageGroupControlsApi } from "@/features/messages/components/messageGroupControls";
 import type { ThreadState } from "@/features/threads/hooks/useThreadsReducer";
 import type { WorkspaceLaunchScriptsState } from "@app/hooks/useWorkspaceLaunchScripts";
@@ -50,7 +55,10 @@ type UseMainAppLayoutSurfacesArgs = {
   onSetThreadListSortKey: SidebarProps["onSetThreadListSortKey"];
   threadListOrganizeMode: SidebarProps["threadListOrganizeMode"];
   onSetThreadListOrganizeMode: SidebarProps["onSetThreadListOrganizeMode"];
+  threadProviderFilter: NonNullable<SidebarProps["threadProviderFilter"]>;
+  onSetThreadProviderFilter: NonNullable<SidebarProps["onSetThreadProviderFilter"]>;
   onRefreshAllThreads: SidebarProps["onRefreshAllThreads"];
+  onReorderWorkspace: SidebarProps["onReorderWorkspace"];
   activeWorkspace: WorkspaceInfo | null;
   activeWorkspaceId: string | null;
   activeThreadId: string | null;
@@ -92,7 +100,12 @@ type UseMainAppLayoutSurfacesArgs = {
   displayNodes: ReturnType<typeof useMainAppDisplayNodes>;
   threadPinning: Pick<
     SidebarProps,
-    "pinThread" | "unpinThread" | "isThreadPinned" | "getPinTimestamp" | "getThreadArgsBadge"
+    | "pinThread"
+    | "unpinThread"
+    | "reorderPinnedThread"
+    | "isThreadPinned"
+    | "getPinTimestamp"
+    | "getThreadArgsBadge"
   >;
   workspaceDrop: {
     workspaceDropTargetRef: SidebarProps["workspaceDropTargetRef"];
@@ -228,6 +241,7 @@ type UseMainAppLayoutSurfacesArgs = {
   dismissErrorToast: LayoutNodesOptions["primary"]["errorToastsProps"]["onDismiss"];
   showDebugButton: boolean;
   handleDebugClick: () => void;
+  onDebug: (entry: DebugEntry) => void;
 };
 
 type MainAppLayoutSurfacesContext = UseMainAppLayoutSurfacesArgs & {
@@ -255,7 +269,10 @@ function buildPrimarySurface({
   onSetThreadListSortKey,
   threadListOrganizeMode,
   onSetThreadListOrganizeMode,
+  threadProviderFilter,
+  onSetThreadProviderFilter,
   onRefreshAllThreads,
+  onReorderWorkspace,
   activeWorkspace,
   activeWorkspaceId,
   activeThreadId,
@@ -380,6 +397,7 @@ function buildPrimarySurface({
   dismissErrorToast,
   showDebugButton,
   handleDebugClick,
+  onDebug,
 }: MainAppLayoutSurfacesContext): LayoutNodesOptions["primary"] {
   return {
     sidebarProps: {
@@ -400,7 +418,10 @@ function buildPrimarySurface({
       onSetThreadListSortKey,
       threadListOrganizeMode,
       onSetThreadListOrganizeMode,
+      threadProviderFilter,
+      onSetThreadProviderFilter,
       onRefreshAllThreads,
+      onReorderWorkspace,
       activeWorkspaceId,
       activeThreadId,
       userInputRequests,
@@ -426,6 +447,7 @@ function buildPrimarySurface({
       onSyncThread: sidebarHandlers.onSyncThread,
       pinThread: threadPinning.pinThread,
       unpinThread: threadPinning.unpinThread,
+      reorderPinnedThread: threadPinning.reorderPinnedThread,
       isThreadPinned: threadPinning.isThreadPinned,
       getPinTimestamp: threadPinning.getPinTimestamp,
       getThreadArgsBadge: threadPinning.getThreadArgsBadge,
@@ -479,12 +501,16 @@ function buildPrimarySurface({
           onSend: handleComposerSendWithDraftStart,
           onStop: interruptTurn,
           canStop: composerWorkspaceState.canInterrupt,
-          disabled: composerWorkspaceState.isReviewing,
+          disabled:
+            composerWorkspaceState.isReviewing ||
+            composerWorkspaceState.isReadOnlyThread,
           onFileAutocompleteActiveChange: composerWorkspaceState.setFileAutocompleteActive,
           contextUsage: activeTokenUsage,
           queuedMessages: composerWorkspaceState.activeQueue,
           queuePausedReason: composerWorkspaceState.queuePausedReason,
-          sendLabel: pullRequestComposer.composerSendLabel ?? "Send",
+          sendLabel: composerWorkspaceState.isReadOnlyThread
+            ? "Claude is read-only"
+            : (pullRequestComposer.composerSendLabel ?? "Send"),
           steerAvailable: composerWorkspaceState.steerAvailable,
           followUpMessageBehavior: appSettings.followUpMessageBehavior,
           composerFollowUpHintEnabled: appSettings.composerFollowUpHintEnabled,
@@ -570,6 +596,7 @@ function buildPrimarySurface({
           onReviewPromptConfirmCommit: confirmCommit,
           onReviewPromptUpdateCustomInstructions: updateCustomInstructions,
           onReviewPromptConfirmCustom: confirmCustom,
+          onDebug,
         }
       : null,
     approvalToastsProps: {
@@ -968,7 +995,10 @@ export function useMainAppLayoutSurfaces({
   onSetThreadListSortKey,
   threadListOrganizeMode,
   onSetThreadListOrganizeMode,
+  threadProviderFilter,
+  onSetThreadProviderFilter,
   onRefreshAllThreads,
+  onReorderWorkspace,
   activeWorkspace,
   activeWorkspaceId,
   activeThreadId,
@@ -1109,6 +1139,7 @@ export function useMainAppLayoutSurfaces({
   dismissErrorToast,
   showDebugButton,
   handleDebugClick,
+  onDebug,
 }: UseMainAppLayoutSurfacesArgs): LayoutNodesOptions {
   const sidebarRateLimits = activeWorkspace ? activeRateLimits : homeRateLimits;
   const sidebarAccount = activeWorkspace ? activeAccount : homeAccount;
@@ -1132,7 +1163,10 @@ export function useMainAppLayoutSurfaces({
     onSetThreadListSortKey,
     threadListOrganizeMode,
     onSetThreadListOrganizeMode,
+    threadProviderFilter,
+    onSetThreadProviderFilter,
     onRefreshAllThreads,
+    onReorderWorkspace,
     activeWorkspace,
     activeWorkspaceId,
     activeThreadId,
@@ -1273,6 +1307,7 @@ export function useMainAppLayoutSurfaces({
     dismissErrorToast,
     showDebugButton,
     handleDebugClick,
+    onDebug,
     sidebarRateLimits,
     sidebarAccount,
   };

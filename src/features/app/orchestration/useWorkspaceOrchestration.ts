@@ -208,5 +208,69 @@ export function useWorkspaceOrderingOrchestration({
     [orderValue, updateWorkspaceSettings, workspaces, workspacesById],
   );
 
-  return { handleMoveWorkspace };
+  const handleReorderWorkspace = useCallback(
+    async (
+      sourceWorkspaceId: string,
+      targetWorkspaceId: string,
+      position: "before" | "after",
+    ) => {
+      if (sourceWorkspaceId === targetWorkspaceId) {
+        return;
+      }
+      const source = workspacesById.get(sourceWorkspaceId);
+      const target = workspacesById.get(targetWorkspaceId);
+      if (
+        !source ||
+        !target ||
+        (source.kind ?? "main") === "worktree" ||
+        (target.kind ?? "main") === "worktree"
+      ) {
+        return;
+      }
+
+      const groupId = source.settings.groupId ?? null;
+      if ((target.settings.groupId ?? null) !== groupId) {
+        return;
+      }
+
+      const ordered = workspaces
+        .filter(
+          (entry) =>
+            (entry.kind ?? "main") !== "worktree" &&
+            (entry.settings.groupId ?? null) === groupId,
+        )
+        .slice()
+        .sort((a, b) => {
+          const orderDiff = orderValue(a) - orderValue(b);
+          if (orderDiff !== 0) {
+            return orderDiff;
+          }
+          return a.name.localeCompare(b.name);
+        });
+
+      const sourceIndex = ordered.findIndex((entry) => entry.id === sourceWorkspaceId);
+      const targetIndex = ordered.findIndex((entry) => entry.id === targetWorkspaceId);
+      if (sourceIndex === -1 || targetIndex === -1) {
+        return;
+      }
+
+      const next = ordered.slice();
+      const [moved] = next.splice(sourceIndex, 1);
+      const targetIndexAfterRemoval = next.findIndex((entry) => entry.id === targetWorkspaceId);
+      const insertIndex =
+        position === "before" ? targetIndexAfterRemoval : targetIndexAfterRemoval + 1;
+      next.splice(insertIndex, 0, moved);
+
+      await Promise.all(
+        next.map((entry, idx) =>
+          updateWorkspaceSettings(entry.id, {
+            sortOrder: idx,
+          }),
+        ),
+      );
+    },
+    [orderValue, updateWorkspaceSettings, workspaces, workspacesById],
+  );
+
+  return { handleMoveWorkspace, handleReorderWorkspace };
 }

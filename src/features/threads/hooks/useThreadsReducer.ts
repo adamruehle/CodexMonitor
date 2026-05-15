@@ -22,6 +22,19 @@ type ThreadActivityStatus = {
   isReviewing: boolean;
   processingStartedAt: number | null;
   lastDurationMs: number | null;
+  activeFlags?: string[];
+};
+
+export type RunningToolCall = {
+  id: string;
+  workspaceId: string;
+  threadId: string;
+  turnId: string | null;
+  toolType: string;
+  title: string;
+  detail: string;
+  startedAt: number;
+  lastSeenAt: number;
 };
 
 export type ThreadState = {
@@ -38,6 +51,7 @@ export type ThreadState = {
   threadListCursorByWorkspace: Record<string, string | null>;
   threadSortKeyByWorkspace: Record<string, ThreadListSortKey>;
   activeTurnIdByThread: Record<string, string | null>;
+  runningToolCallsByThread: Record<string, Record<string, RunningToolCall>>;
   turnDiffByThread: Record<string, string>;
   approvals: ApprovalRequest[];
   userInputRequests: RequestUserInputRequest[];
@@ -61,8 +75,20 @@ export type ThreadAction =
       isProcessing: boolean;
       timestamp: number;
     }
+  | { type: "setThreadActiveFlags"; threadId: string; activeFlags: string[] }
   | { type: "markReviewing"; threadId: string; isReviewing: boolean }
   | { type: "markUnread"; threadId: string; hasUnread: boolean }
+  | { type: "markToolCallStarted"; toolCall: RunningToolCall }
+  | {
+      type: "markToolCallCompleted";
+      threadId: string;
+      itemId: string;
+    }
+  | {
+      type: "clearRunningToolCalls";
+      threadId: string;
+      turnId?: string | null;
+    }
   | {
       type: "addAssistantMessage";
       threadId: string;
@@ -206,6 +232,7 @@ export const initialState: ThreadState = {
   threadListCursorByWorkspace: {},
   threadSortKeyByWorkspace: {},
   activeTurnIdByThread: {},
+  runningToolCallsByThread: {},
   turnDiffByThread: {},
   approvals: [],
   userInputRequests: [],

@@ -1,8 +1,13 @@
 import { useCallback, useState } from "react";
-import type { ThreadListOrganizeMode, ThreadListSortKey } from "../../../types";
+import type {
+  ThreadListOrganizeMode,
+  ThreadListSortKey,
+  ThreadProviderFilter,
+} from "../../../types";
 
 const THREAD_LIST_SORT_KEY_STORAGE_KEY = "codexmonitor.threadListSortKey";
 const THREAD_LIST_ORGANIZE_MODE_STORAGE_KEY = "codexmonitor.threadListOrganizeMode";
+const THREAD_PROVIDER_FILTER_STORAGE_KEY = "codexmonitor.threadProviderFilter";
 
 function getStoredThreadListSortKey(): ThreadListSortKey {
   if (typeof window === "undefined") {
@@ -26,12 +31,26 @@ function getStoredThreadListOrganizeMode(): ThreadListOrganizeMode {
   return "by_project";
 }
 
+function getStoredThreadProviderFilter(): ThreadProviderFilter {
+  if (typeof window === "undefined") {
+    return "all";
+  }
+  const stored = window.localStorage.getItem(THREAD_PROVIDER_FILTER_STORAGE_KEY);
+  if (stored === "all" || stored === "codex" || stored === "claude") {
+    return stored;
+  }
+  return "all";
+}
+
 export function useThreadListSortKey() {
   const [threadListSortKey, setThreadListSortKeyState] = useState<ThreadListSortKey>(
     () => getStoredThreadListSortKey(),
   );
   const [threadListOrganizeMode, setThreadListOrganizeModeState] = useState<ThreadListOrganizeMode>(
     () => getStoredThreadListOrganizeMode(),
+  );
+  const [threadProviderFilter, setThreadProviderFilterState] = useState<ThreadProviderFilter>(
+    () => getStoredThreadProviderFilter(),
   );
 
   const setThreadListSortKey = useCallback((nextSortKey: ThreadListSortKey) => {
@@ -54,10 +73,22 @@ export function useThreadListSortKey() {
     [],
   );
 
+  const setThreadProviderFilter = useCallback((nextProviderFilter: ThreadProviderFilter) => {
+    setThreadProviderFilterState(nextProviderFilter);
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(
+        THREAD_PROVIDER_FILTER_STORAGE_KEY,
+        nextProviderFilter,
+      );
+    }
+  }, []);
+
   return {
     threadListSortKey,
     setThreadListSortKey,
     threadListOrganizeMode,
     setThreadListOrganizeMode,
+    threadProviderFilter,
+    setThreadProviderFilter,
   };
 }

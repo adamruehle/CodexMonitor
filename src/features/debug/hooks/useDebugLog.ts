@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 import type { DebugEntry } from "../../../types";
+import { appendDevLog } from "../../../services/tauri";
 
 const MAX_DEBUG_ENTRIES = 200;
 
@@ -45,8 +46,37 @@ export function useDebugLog() {
     return false;
   }, []);
 
+  const shouldPersistEntry = useCallback(
+    (entry: DebugEntry) => {
+      if (isAlertEntry(entry)) {
+        return true;
+      }
+      if (entry.source === "client" || entry.source === "server") {
+        return true;
+      }
+      const label = entry.label.toLowerCase();
+      return (
+        label.includes("turn") ||
+        label.includes("thread/status") ||
+        label.includes("thread/closed") ||
+        label.includes("thread/error") ||
+        label.includes("item/started") ||
+        label.includes("item/completed") ||
+        label.includes("thread/item/started") ||
+        label.includes("thread/item/completed") ||
+        label.includes("tool/watchdog") ||
+        label.includes("message/completed") ||
+        label.includes("agent_message")
+      );
+    },
+    [isAlertEntry],
+  );
+
   const addDebugEntry = useCallback(
     (entry: DebugEntry) => {
+      if (shouldPersistEntry(entry)) {
+        void appendDevLog(entry);
+      }
       const isAlert = isAlertEntry(entry);
       if (!debugOpenRef.current && !isAlert) {
         return;
@@ -57,7 +87,7 @@ export function useDebugLog() {
       const compactEntry = { ...entry, payload: summarizePayload(entry.payload) };
       setDebugEntries((prev) => [...prev, compactEntry].slice(-MAX_DEBUG_ENTRIES));
     },
-    [isAlertEntry],
+    [isAlertEntry, shouldPersistEntry],
   );
 
   const handleCopyDebug = useCallback(async () => {

@@ -34,11 +34,17 @@ function writeStoredHistory(key: string, value: string[]) {
   if (typeof window === "undefined") {
     return;
   }
-  if (value.length === 0) {
-    window.localStorage.removeItem(getStorageKey(key));
-    return;
+  const storageKey = getStorageKey(key);
+  try {
+    if (value.length === 0) {
+      window.localStorage.removeItem(storageKey);
+      return;
+    }
+    window.localStorage.setItem(storageKey, JSON.stringify(value));
+  } catch {
+    // Prompt history is convenience-only. When WebKit localStorage is full,
+    // sending should still succeed and the composer should still clear.
   }
-  window.localStorage.setItem(getStorageKey(key), JSON.stringify(value));
 }
 
 type UsePromptHistoryOptions = {

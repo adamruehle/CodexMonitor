@@ -25,6 +25,7 @@ import { useThreadStatus } from "./useThreadStatus";
 import { useThreadUserInput } from "./useThreadUserInput";
 import { useThreadTitleAutogeneration } from "./useThreadTitleAutogeneration";
 import { useDetachedReviewTracking } from "./useDetachedReviewTracking";
+import { useToolCallWatchdog } from "./useToolCallWatchdog";
 import {
   archiveThread as archiveThreadService,
   readThread as readThreadService,
@@ -236,6 +237,7 @@ export function useThreads({
     recordThreadActivity,
     pinThread,
     unpinThread,
+    reorderPinnedThread,
     isThreadPinned,
     getPinTimestamp,
   } = useThreadStorage();
@@ -1016,6 +1018,18 @@ export function useThreads({
     renameThread,
   });
 
+  useToolCallWatchdog({
+    activeWorkspace,
+    runningToolCallsByThread: state.runningToolCallsByThread,
+    threadStatusById: state.threadStatusById,
+    activeTurnIdByThread: state.activeTurnIdByThread,
+    approvals: state.approvals,
+    userInputRequests: state.userInputRequests,
+    dispatch,
+    onDebug,
+    sendUserMessageToThread,
+  });
+
   const hasLocalThreadSnapshot = useCallback(
     (threadId: string | null, workspaceId?: string | null) => {
       const targetWorkspaceId = workspaceId ?? activeWorkspaceId;
@@ -1178,6 +1192,7 @@ export function useThreads({
     removeThread,
     pinThread,
     unpinThread,
+    reorderPinnedThread,
     isThreadPinned,
     getPinTimestamp,
     renameThread,

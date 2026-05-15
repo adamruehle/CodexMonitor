@@ -235,8 +235,6 @@ export function WorkspaceHome({
     handleTextChange(next, cursor);
   };
 
-  const isDictationBusy = dictationState !== "idle";
-
   useEffect(() => {
     setShowIcon(true);
   }, [workspace.id]);
@@ -288,9 +286,6 @@ export function WorkspaceHome({
     if (!prompt.trim() && activeImages.length === 0) {
       return;
     }
-    if (isDictationBusy) {
-      return;
-    }
 
     const trimmed = prompt.trim();
     const didStart = await onStartRun(activeImages);
@@ -319,10 +314,6 @@ export function WorkspaceHome({
     }
 
     if (event.key === "Enter" && !event.shiftKey) {
-      if (isDictationBusy) {
-        event.preventDefault();
-        return;
-      }
       event.preventDefault();
       void handleRunSubmit();
     }

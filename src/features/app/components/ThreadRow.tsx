@@ -132,12 +132,18 @@ export function ThreadRow({
       )
     : undefined;
   const effectiveWorkspaceLabel = depth > 0 ? null : workspaceLabel;
+  const providerLabel = thread.provider === "claude" ? "Claude" : null;
   const contextLabel = badge ?? modelBadge;
   const canPin = depth === 0;
   const isPinned = canPin && isThreadPinned(workspaceId, thread.id);
   const canToggleSubagents = hasSubagentChildren && Boolean(onToggleSubagents);
   const hasDetails = Boolean(
-    effectiveWorkspaceLabel || subagentLabel || contextLabel || statusLabel || isPinned,
+    effectiveWorkspaceLabel ||
+      providerLabel ||
+      subagentLabel ||
+      contextLabel ||
+      statusLabel ||
+      isPinned,
   );
 
   return (
@@ -173,6 +179,11 @@ export function ThreadRow({
             {effectiveWorkspaceLabel && (
               <span className="thread-workspace-label" title={effectiveWorkspaceLabel}>
                 {effectiveWorkspaceLabel}
+              </span>
+            )}
+            {providerLabel && (
+              <span className="thread-provider-label" title={providerLabel}>
+                {providerLabel}
               </span>
             )}
             {subagentLabel && (

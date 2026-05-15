@@ -2,7 +2,11 @@
 import { describe, expect, it, beforeEach } from "vitest";
 import type { ConversationItem } from "@/types";
 import {
+  loadPinnedThreadOrder,
   loadThreadItems,
+  normalizePinnedThreadOrder,
+  savePinnedThreadOrder,
+  STORAGE_KEY_PINNED_THREAD_ORDER,
   saveThreadItems,
   STORAGE_KEY_THREAD_ITEMS,
 } from "./threadStorage";
@@ -10,6 +14,43 @@ import {
 describe("threadStorage", () => {
   beforeEach(() => {
     window.localStorage.clear();
+  });
+
+  it("loads and normalizes persisted pinned thread order", () => {
+    window.localStorage.setItem(
+      STORAGE_KEY_PINNED_THREAD_ORDER,
+      JSON.stringify(["ws-1:thread-2", "", "ws-1:thread-2", "ws-1:thread-1"]),
+    );
+
+    expect(loadPinnedThreadOrder()).toEqual([
+      "ws-1:thread-2",
+      "ws-1:thread-1",
+    ]);
+  });
+
+  it("normalizes pinned thread order against current pinned membership", () => {
+    expect(
+      normalizePinnedThreadOrder(
+        {
+          "ws-1:thread-1": 100,
+          "ws-2:thread-2": 200,
+          "ws-3:thread-3": 300,
+        },
+        ["ws-2:thread-2", "ws-1:missing", "ws-2:thread-2"],
+      ),
+    ).toEqual([
+      "ws-2:thread-2",
+      "ws-1:thread-1",
+      "ws-3:thread-3",
+    ]);
+  });
+
+  it("persists pinned thread order", () => {
+    savePinnedThreadOrder(["ws-1:thread-1", "ws-2:thread-2"]);
+
+    expect(
+      JSON.parse(window.localStorage.getItem(STORAGE_KEY_PINNED_THREAD_ORDER) ?? "[]"),
+    ).toEqual(["ws-1:thread-1", "ws-2:thread-2"]);
   });
 
   it("repairs persisted thread items with missing turn ids when loading", () => {

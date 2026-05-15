@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type {
   AppMention,
   ComposerSendIntent,
+  DebugEntry,
   FollowUpMessageBehavior,
   QueuedMessage,
   SendMessageResult,
@@ -44,6 +45,7 @@ type UseQueuedSendOptions = {
   startFast: (text: string) => Promise<void>;
   startStatus: (text: string) => Promise<void>;
   clearActiveImages: () => void;
+  onDebug?: (entry: DebugEntry) => void;
 };
 
 type UseQueuedSendResult = {
@@ -54,12 +56,12 @@ type UseQueuedSendResult = {
     images?: string[],
     appMentions?: AppMention[],
     submitIntent?: ComposerSendIntent,
-  ) => Promise<void>;
+  ) => Promise<SendMessageResult>;
   queueMessage: (
     text: string,
     images?: string[],
     appMentions?: AppMention[],
-  ) => Promise<void>;
+  ) => Promise<SendMessageResult>;
   removeQueuedMessage: (threadId: string, messageId: string) => void;
 };
 
@@ -128,6 +130,7 @@ export function useQueuedSend({
   startFast,
   startStatus,
   clearActiveImages,
+  onDebug,
 }: UseQueuedSendOptions): UseQueuedSendResult {
   const [queuedByThread, setQueuedByThread] = useState<
     Record<string, QueuedMessage[]>
@@ -143,6 +146,7 @@ export function useQueuedSend({
     () => (activeThreadId ? queuedByThread[activeThreadId] ?? [] : []),
     [activeThreadId, queuedByThread],
   );
+  const isActivelyReviewing = isProcessing && isReviewing;
 
   const enqueueMessage = useCallback((threadId: string, item: QueuedMessage) => {
     setQueuedByThread((prev) => ({
@@ -181,39 +185,52 @@ export function useQueuedSend({
     [],
   );
 
+  const logComposerSend = useCallback(
+    (label: string, payload: Record<string, unknown>, source: DebugEntry["source"] = "client") => {
+      onDebug?.({
+        id: `${Date.now()}-${label.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}`,
+        timestamp: Date.now(),
+        source,
+        label,
+        payload,
+      });
+    },
+    [onDebug],
+  );
+
   const runSlashCommand = useCallback(
-    async (command: SlashCommandKind, trimmed: string) => {
+    async (command: SlashCommandKind, trimmed: string): Promise<SendMessageResult> => {
       if (command === "fork") {
         await startFork(trimmed);
-        return;
+        return { status: "sent" };
       }
       if (command === "review") {
         await startReview(trimmed);
-        return;
+        return { status: "sent" };
       }
       if (command === "resume") {
         await startResume(trimmed);
-        return;
+        return { status: "sent" };
       }
       if (command === "compact") {
         await startCompact(trimmed);
-        return;
+        return { status: "sent" };
       }
       if (command === "apps") {
         await startApps(trimmed);
-        return;
+        return { status: "sent" };
       }
       if (command === "mcp") {
         await startMcp(trimmed);
-        return;
+        return { status: "sent" };
       }
       if (command === "fast") {
         await startFast(trimmed);
-        return;
+        return { status: "sent" };
       }
       if (command === "status") {
         await startStatus(trimmed);
-        return;
+        return { status: "sent" };
       }
       if (command === "new" && activeWorkspace) {
         const threadId = await startThreadForWorkspace(activeWorkspace.id);
@@ -221,7 +238,17 @@ export function useQueuedSend({
         if (threadId && rest) {
           await sendUserMessageToThread(activeWorkspace, threadId, rest, []);
         }
+        return threadId
+          ? { status: "sent" }
+          : {
+              status: "blocked",
+              message: "Could not start a new thread for this workspace.",
+            };
       }
+      return {
+        status: "blocked",
+        message: "No active workspace is available for this command.",
+      };
     },
     [
       activeWorkspace,
@@ -244,7 +271,7 @@ export function useQueuedSend({
       images: string[] = [],
       appMentions: AppMention[] = [],
       submitIntent: ComposerSendIntent = "default",
-    ) => {
+    ): Promise<SendMessageResult> => {
       const trimmed = text.trim();
       const command = parseSlashCommand(trimmed, appsEnabled);
       const nextImages = command ? [] : images;
@@ -262,42 +289,88 @@ export function useQueuedSend({
             : followUpMessageBehavior === "steer" && canSteerCurrentTurn
               ? "steer"
               : "queue";
+      const baseDebugPayload = {
+        activeThreadId,
+        activeTurnId,
+        workspaceId: activeWorkspace?.id ?? null,
+        workspaceConnected: activeWorkspace?.connected ?? null,
+        isProcessing,
+        isReviewing,
+        isActivelyReviewing,
+        queueFlushPaused,
+        steerEnabled,
+        canSteerCurrentTurn,
+        followUpMessageBehavior,
+        submitIntent,
+        effectiveIntent,
+        command,
+        textLength: trimmed.length,
+        imagesCount: nextImages.length,
+        appMentionsCount: nextMentions.length,
+      };
+      const finish = (
+        result: SendMessageResult,
+        extra: Record<string, unknown> = {},
+      ): SendMessageResult => {
+        logComposerSend("composer/send result", {
+          ...baseDebugPayload,
+          status: result.status,
+          message: result.message ?? null,
+          ...extra,
+        }, result.status === "blocked" ? "error" : "client");
+        return result;
+      };
+      logComposerSend("composer/send requested", baseDebugPayload);
       if (!trimmed && nextImages.length === 0) {
-        return;
+        return finish({ status: "blocked", message: "Nothing to send." });
       }
-      if (activeThreadId && isReviewing) {
-        return;
+      if (activeThreadId && isActivelyReviewing) {
+        return finish({
+          status: "blocked",
+          message: "Review is still active for this thread.",
+        });
       }
       if (isProcessing && activeThreadId && effectiveIntent === "queue") {
         const item = createQueuedItem(trimmed, nextImages, nextMentions);
         enqueueMessage(activeThreadId, item);
         clearActiveImages();
-        return;
+        return finish({ status: "queued" }, { queuedMessageId: item.id });
       }
       if (activeWorkspace && !activeWorkspace.connected) {
         await connectWorkspace(activeWorkspace);
       }
       if (command) {
-        await runSlashCommand(command, trimmed);
-        clearActiveImages();
-        return;
+        const result = await runSlashCommand(command, trimmed);
+        if (result.status !== "blocked") {
+          clearActiveImages();
+        }
+        return finish(result, { routedTo: "slash-command" });
       }
       const sendResult =
         nextMentions.length > 0
           ? await sendUserMessage(trimmed, nextImages, nextMentions, {
-            sendIntent: effectiveIntent,
-          })
+              sendIntent: effectiveIntent,
+            })
           : await sendUserMessage(trimmed, nextImages, undefined, {
-          sendIntent: effectiveIntent,
-          });
+              sendIntent: effectiveIntent,
+            });
       if (
         sendResult.status === "steer_failed" &&
         activeThreadId &&
         isProcessing
       ) {
-        enqueueMessage(activeThreadId, createQueuedItem(trimmed, nextImages, nextMentions));
+        const item = createQueuedItem(trimmed, nextImages, nextMentions);
+        enqueueMessage(activeThreadId, item);
+        clearActiveImages();
+        return finish(
+          { status: "queued" },
+          { routedTo: "steer-fallback-queue", queuedMessageId: item.id },
+        );
       }
-      clearActiveImages();
+      if (sendResult.status !== "blocked") {
+        clearActiveImages();
+      }
+      return finish(sendResult, { routedTo: "thread-message" });
     },
     [
       activeThreadId,
@@ -310,7 +383,10 @@ export function useQueuedSend({
       activeTurnId,
       followUpMessageBehavior,
       isProcessing,
+      isActivelyReviewing,
       isReviewing,
+      logComposerSend,
+      queueFlushPaused,
       steerEnabled,
       runSlashCommand,
       sendUserMessage,
@@ -322,23 +398,30 @@ export function useQueuedSend({
       text: string,
       images: string[] = [],
       appMentions: AppMention[] = [],
-    ) => {
+    ): Promise<SendMessageResult> => {
       const trimmed = text.trim();
       const command = parseSlashCommand(trimmed, appsEnabled);
       const nextImages = command ? [] : images;
       const nextMentions = command ? [] : appMentions;
       if (!trimmed && nextImages.length === 0) {
-        return;
+        return { status: "blocked", message: "Nothing to queue." };
       }
-      if (activeThreadId && isReviewing) {
-        return;
+      if (activeThreadId && isActivelyReviewing) {
+        return {
+          status: "blocked",
+          message: "Review is still active for this thread.",
+        };
       }
       if (!activeThreadId) {
-        return;
+        return {
+          status: "blocked",
+          message: "No active thread is available for this queued message.",
+        };
       }
       const item = createQueuedItem(trimmed, nextImages, nextMentions);
       enqueueMessage(activeThreadId, item);
       clearActiveImages();
+      return { status: "queued" };
     },
     [
       activeThreadId,
@@ -346,7 +429,7 @@ export function useQueuedSend({
       clearActiveImages,
       createQueuedItem,
       enqueueMessage,
-      isReviewing,
+      isActivelyReviewing,
     ],
   );
 
@@ -358,7 +441,7 @@ export function useQueuedSend({
     if (!inFlight) {
       return;
     }
-    if (isProcessing || isReviewing) {
+    if (isProcessing || isActivelyReviewing) {
       if (!hasStartedByThread[activeThreadId]) {
         setHasStartedByThread((prev) => ({
           ...prev,
@@ -376,11 +459,11 @@ export function useQueuedSend({
     hasStartedByThread,
     inFlightByThread,
     isProcessing,
-    isReviewing,
+    isActivelyReviewing,
   ]);
 
   useEffect(() => {
-    if (!activeThreadId || isProcessing || isReviewing || queueFlushPaused) {
+    if (!activeThreadId || isProcessing || isActivelyReviewing || queueFlushPaused) {
       return;
     }
     if (inFlightByThread[activeThreadId]) {
@@ -392,6 +475,13 @@ export function useQueuedSend({
     }
     const threadId = activeThreadId;
     const nextItem = queue[0];
+    logComposerSend("queue/flush started", {
+      threadId,
+      queuedMessageId: nextItem.id,
+      textLength: nextItem.text.trim().length,
+      imagesCount: nextItem.images?.length ?? 0,
+      appMentionsCount: nextItem.appMentions?.length ?? 0,
+    });
     setInFlightByThread((prev) => ({ ...prev, [threadId]: nextItem }));
     setHasStartedByThread((prev) => ({ ...prev, [threadId]: false }));
     setQueuedByThread((prev) => ({
@@ -403,16 +493,40 @@ export function useQueuedSend({
         const trimmed = nextItem.text.trim();
         const command = parseSlashCommand(trimmed, appsEnabled);
         if (command) {
-          await runSlashCommand(command, trimmed);
+          const result = await runSlashCommand(command, trimmed);
+          logComposerSend("queue/flush result", {
+            threadId,
+            queuedMessageId: nextItem.id,
+            status: result.status,
+            message: result.message ?? null,
+            routedTo: "slash-command",
+          }, result.status === "blocked" ? "error" : "client");
         } else {
           const queuedMentions = nextItem.appMentions ?? [];
+          let result: SendMessageResult;
           if (queuedMentions.length > 0) {
-            await sendUserMessage(nextItem.text, nextItem.images ?? [], queuedMentions);
+            result = await sendUserMessage(
+              nextItem.text,
+              nextItem.images ?? [],
+              queuedMentions,
+            );
           } else {
-            await sendUserMessage(nextItem.text, nextItem.images ?? []);
+            result = await sendUserMessage(nextItem.text, nextItem.images ?? []);
           }
+          logComposerSend("queue/flush result", {
+            threadId,
+            queuedMessageId: nextItem.id,
+            status: result.status,
+            message: result.message ?? null,
+            routedTo: "thread-message",
+          }, result.status === "blocked" ? "error" : "client");
         }
-      } catch {
+      } catch (error) {
+        logComposerSend("queue/flush error", {
+          threadId,
+          queuedMessageId: nextItem.id,
+          message: error instanceof Error ? error.message : String(error),
+        }, "error");
         setInFlightByThread((prev) => ({ ...prev, [threadId]: null }));
         setHasStartedByThread((prev) => ({ ...prev, [threadId]: false }));
         prependQueuedMessage(threadId, nextItem);
@@ -423,12 +537,13 @@ export function useQueuedSend({
     appsEnabled,
     inFlightByThread,
     isProcessing,
-    isReviewing,
+    isActivelyReviewing,
     queueFlushPaused,
     prependQueuedMessage,
     queuedByThread,
     runSlashCommand,
     sendUserMessage,
+    logComposerSend,
   ]);
 
   return {

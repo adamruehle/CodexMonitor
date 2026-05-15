@@ -25,7 +25,7 @@ export function RenameThreadPrompt({
 
   return (
     <ModalShell
-      className="worktree-modal"
+      className="worktree-modal rename-thread-modal"
       onBackdropClick={onCancel}
       ariaLabel="Rename thread"
     >

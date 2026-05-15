@@ -6,6 +6,7 @@ import type {
   AppMention,
   AppSettings,
   ComposerSendIntent,
+  SendMessageResult,
   ServiceTier,
 } from "@/types";
 import { normalizeCodexArgsInput } from "@/utils/codexArgsInput";
@@ -86,7 +87,7 @@ type SendOrQueueHandler = (
   images: string[],
   appMentions?: AppMention[],
   submitIntent?: ComposerSendIntent,
-) => Promise<void>;
+) => Promise<SendMessageResult>;
 
 type UseThreadUiOrchestrationParams = {
   activeWorkspaceId: string | null | undefined;
@@ -96,7 +97,7 @@ type UseThreadUiOrchestrationParams = {
   selectedCollaborationModeId: string | null;
   selectedCodexArgsOverride?: string | null;
   pendingNewThreadSeedRef: MutableRefObject<PendingNewThreadSeed | null>;
-  runWithDraftStart: (runner: () => Promise<void>) => Promise<void>;
+  runWithDraftStart: <T>(runner: () => Promise<T>) => Promise<T>;
   handleComposerSend: SendOrQueueHandler;
   clearDraftState: () => void;
   exitDiffView: () => void;

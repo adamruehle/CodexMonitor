@@ -15,11 +15,8 @@ export function getThreadStatusClass(
   if (hasPendingUserInput) {
     return "unread";
   }
-  if (status?.isReviewing) {
-    return "reviewing";
-  }
   if (status?.isProcessing) {
-    return "processing";
+    return status?.isReviewing ? "reviewing" : "processing";
   }
   if (status?.hasUnread) {
     return "unread";
@@ -37,10 +34,9 @@ export function getWorkspaceHomeThreadState(
   status: ThreadStatusFlags | undefined,
 ): WorkspaceHomeThreadState {
   if (status?.isProcessing) {
-    return { statusLabel: "Running", stateClass: "is-running", isRunning: true };
-  }
-  if (status?.isReviewing) {
-    return { statusLabel: "Reviewing", stateClass: "is-reviewing", isRunning: false };
+    return status?.isReviewing
+      ? { statusLabel: "Reviewing", stateClass: "is-reviewing", isRunning: true }
+      : { statusLabel: "Running", stateClass: "is-running", isRunning: true };
   }
   return { statusLabel: "Idle", stateClass: "is-idle", isRunning: false };
 }

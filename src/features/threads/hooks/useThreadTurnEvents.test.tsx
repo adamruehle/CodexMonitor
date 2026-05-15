@@ -517,12 +517,20 @@ describe("useThreadTurnEvents", () => {
   });
 
   it("marks processing when thread status changes to active", () => {
-    const { result, markProcessing, setActiveTurnId } = makeOptions();
+    const { result, dispatch, markProcessing, setActiveTurnId } = makeOptions();
 
     act(() => {
-      result.current.onThreadStatusChanged("ws-1", "thread-1", { type: "active" });
+      result.current.onThreadStatusChanged("ws-1", "thread-1", {
+        type: "active",
+        activeFlags: ["waitingOnApproval"],
+      });
     });
 
+    expect(dispatch).toHaveBeenCalledWith({
+      type: "setThreadActiveFlags",
+      threadId: "thread-1",
+      activeFlags: ["waitingOnApproval"],
+    });
     expect(markProcessing).toHaveBeenCalledWith("thread-1", true);
     expect(setActiveTurnId).not.toHaveBeenCalled();
   });
@@ -530,6 +538,7 @@ describe("useThreadTurnEvents", () => {
   it("clears processing, active turn, and pending interrupt for non-active thread status", () => {
     const {
       result,
+      dispatch,
       markProcessing,
       setActiveTurnId,
       setThreadLoaded,
@@ -545,7 +554,38 @@ describe("useThreadTurnEvents", () => {
 
     expect(markProcessing).toHaveBeenCalledWith("thread-1", false);
     expect(setActiveTurnId).toHaveBeenCalledWith("thread-1", null);
+    expect(dispatch).toHaveBeenCalledWith({
+      type: "setThreadActiveFlags",
+      threadId: "thread-1",
+      activeFlags: [],
+    });
+    expect(dispatch).toHaveBeenCalledWith({
+      type: "clearRunningToolCalls",
+      threadId: "thread-1",
+    });
     expect(setThreadLoaded).not.toHaveBeenCalled();
+    expect(pendingInterruptsRef.current.has("thread-1")).toBe(false);
+  });
+
+  it("clears processing when thread status changes to stopped", () => {
+    const {
+      result,
+      markProcessing,
+      setActiveTurnId,
+      markTurnSettled,
+      pendingInterruptsRef,
+    } = makeOptions({
+      activeTurnByThread: { "thread-1": "turn-1" },
+      pendingInterrupts: ["thread-1"],
+    });
+
+    act(() => {
+      result.current.onThreadStatusChanged("ws-1", "thread-1", { type: "stopped" });
+    });
+
+    expect(markTurnSettled).toHaveBeenCalledWith("thread-1", "turn-1");
+    expect(markProcessing).toHaveBeenCalledWith("thread-1", false);
+    expect(setActiveTurnId).toHaveBeenCalledWith("thread-1", null);
     expect(pendingInterruptsRef.current.has("thread-1")).toBe(false);
   });
 

@@ -6,6 +6,7 @@ import type {
   GitHubPullRequest,
   PullRequestReviewAction,
   PullRequestReviewIntent,
+  SendMessageResult,
   WorkspaceInfo,
 } from "../../../types";
 import type { GitDiffSource, GitPanelMode } from "../types";
@@ -52,7 +53,7 @@ type UsePullRequestComposerOptions = {
     images: string[],
     appMentions?: AppMention[],
     submitIntent?: ComposerSendIntent,
-  ) => Promise<void>;
+  ) => Promise<SendMessageResult>;
 };
 
 export function usePullRequestComposer({
@@ -134,9 +135,12 @@ export function usePullRequestComposer({
       images: string[] = [],
       appMentions: AppMention[] = [],
       submitIntent?: ComposerSendIntent,
-    ) => {
+    ): Promise<SendMessageResult> => {
       if (pullRequestReviewLaunching) {
-        return;
+        return {
+          status: "blocked",
+          message: "A pull request review is already starting.",
+        };
       }
       const trimmed = text.trim();
       const reviewCommand = parsePullRequestReviewCommand(trimmed);
@@ -149,22 +153,26 @@ export function usePullRequestComposer({
         });
         if (reviewThreadId) {
           clearActiveImages();
+          return { status: "sent" };
         }
-        return;
+        return {
+          status: "blocked",
+          message: "Could not start the pull request review thread.",
+        };
       }
       if (KNOWN_SLASH_COMMAND_REGEX.test(trimmed)) {
-        if (appMentions.length > 0) {
-          await handleSend(trimmed, images, appMentions, submitIntent);
-        } else {
-          await handleSend(trimmed, images, undefined, submitIntent);
-        }
-        return;
+        return appMentions.length > 0
+          ? handleSend(trimmed, images, appMentions, submitIntent)
+          : handleSend(trimmed, images, undefined, submitIntent);
       }
       if (!activeWorkspace || !selectedPullRequest) {
-        return;
+        return {
+          status: "blocked",
+          message: "No pull request is selected.",
+        };
       }
       if (!trimmed && images.length === 0) {
-        return;
+        return { status: "blocked", message: "Nothing to send." };
       }
       const reviewThreadId = await runPullRequestReview({
         intent: "question",
@@ -174,7 +182,12 @@ export function usePullRequestComposer({
       });
       if (reviewThreadId) {
         clearActiveImages();
+        return { status: "sent" };
       }
+      return {
+        status: "blocked",
+        message: "Could not start the pull request question thread.",
+      };
     },
     [
       activeWorkspace,

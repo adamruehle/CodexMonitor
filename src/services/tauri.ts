@@ -3,6 +3,7 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import type { Options as NotificationOptions } from "@tauri-apps/plugin-notification";
 import type {
   AppSettings,
+  DebugEntry,
   CodexUpdateResult,
   CodexDoctorResult,
   DictationModelStatus,
@@ -35,6 +36,86 @@ function isMissingTauriInvokeError(error: unknown) {
     (error.message.includes("reading 'invoke'") ||
       error.message.includes("reading \"invoke\""))
   );
+}
+
+const DEV_LOG_MAX_STRING_LENGTH = 2_000;
+const DEV_LOG_MAX_ARRAY_ITEMS = 20;
+const DEV_LOG_MAX_OBJECT_KEYS = 80;
+
+function shouldRedactDevLogKey(key: string) {
+  const normalized = key.replace(/[-_]/g, "").toLowerCase();
+  return (
+    normalized.includes("authorization") ||
+    normalized.includes("accesstoken") ||
+    normalized.includes("refreshtoken") ||
+    normalized.includes("apikey") ||
+    normalized.includes("password") ||
+    normalized.includes("secret") ||
+    normalized.includes("cookie") ||
+    normalized.includes("credential") ||
+    normalized.includes("privatekey")
+  );
+}
+
+function sanitizeDevLogValue(value: unknown, depth = 0): unknown {
+  if (value === null || value === undefined) {
+    return value;
+  }
+  if (typeof value === "number" || typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "string") {
+    if (/^data:image\//i.test(value)) {
+      return { _type: "data-url", length: value.length };
+    }
+    if (value.length > DEV_LOG_MAX_STRING_LENGTH) {
+      return {
+        _type: "string",
+        length: value.length,
+        preview: value.slice(0, DEV_LOG_MAX_STRING_LENGTH),
+      };
+    }
+    return value;
+  }
+  if (depth >= 6) {
+    return { _type: "truncated", reason: "max-depth" };
+  }
+  if (Array.isArray(value)) {
+    const items = value
+      .slice(0, DEV_LOG_MAX_ARRAY_ITEMS)
+      .map((item) => sanitizeDevLogValue(item, depth + 1));
+    return {
+      _type: "array",
+      count: value.length,
+      items,
+      truncated: value.length > items.length,
+    };
+  }
+  if (typeof value === "object") {
+    const source = value as Record<string, unknown>;
+    const result: Record<string, unknown> = {};
+    const entries = Object.entries(source);
+    for (const [key, entryValue] of entries.slice(0, DEV_LOG_MAX_OBJECT_KEYS)) {
+      result[key] = shouldRedactDevLogKey(key)
+        ? "<redacted>"
+        : sanitizeDevLogValue(entryValue, depth + 1);
+    }
+    if (entries.length > DEV_LOG_MAX_OBJECT_KEYS) {
+      result._truncatedKeys = entries.length - DEV_LOG_MAX_OBJECT_KEYS;
+    }
+    return result;
+  }
+  return String(value);
+}
+
+export async function appendDevLog(entry: DebugEntry | Record<string, unknown>) {
+  try {
+    await invoke("append_dev_log", { entry: sanitizeDevLogValue(entry) });
+  } catch (error) {
+    if (!isMissingTauriInvokeError(error)) {
+      console.warn("Failed to append CodexMonitor dev log entry.", error);
+    }
+  }
 }
 
 export async function pickWorkspacePath(): Promise<string | null> {

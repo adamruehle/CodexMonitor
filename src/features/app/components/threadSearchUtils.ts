@@ -31,6 +31,7 @@ export function threadMatchesQuery(
   return (
     includesNormalizedText(thread.name, query) ||
     includesNormalizedText(workspaceName, query) ||
+    includesNormalizedText(thread.provider ?? "codex", query) ||
     includesNormalizedText(thread.modelId ?? null, query) ||
     includesNormalizedText(thread.effort ?? null, query)
   );

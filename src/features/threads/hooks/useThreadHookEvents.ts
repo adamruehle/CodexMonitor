@@ -57,7 +57,11 @@ function formatHookOutput(run: HookRun) {
     .join("\n");
 }
 
-function buildHookConversationItem(run: HookRun, status: string): ConversationItem {
+function buildHookConversationItem(
+  run: HookRun,
+  status: string,
+  turnId: string | null,
+): ConversationItem {
   const eventName = asString(run.eventName ?? run.event_name).trim();
   const durationValue = run.durationMs ?? run.duration_ms;
   const parsedDuration =
@@ -78,6 +82,7 @@ function buildHookConversationItem(run: HookRun, status: string): ConversationIt
       typeof parsedDuration === "number" && Number.isFinite(parsedDuration)
         ? parsedDuration
         : null,
+    turnId,
   };
 }
 
@@ -99,13 +104,19 @@ export function useThreadHookEvents({
   safeMessageActivity,
 }: UseThreadHookEventsOptions) {
   const upsertHookItem = useCallback(
-    (workspaceId: string, threadId: string, run: HookRun, status: string) => {
+    (
+      workspaceId: string,
+      threadId: string,
+      turnId: string | null,
+      run: HookRun,
+      status: string,
+    ) => {
       dispatch({ type: "ensureThread", workspaceId, threadId });
       dispatch({
         type: "upsertItem",
         workspaceId,
         threadId,
-        item: buildHookConversationItem(run, status),
+        item: buildHookConversationItem(run, status, turnId),
         hasCustomName: false,
       });
       safeMessageActivity();
@@ -117,13 +128,13 @@ export function useThreadHookEvents({
     (
       workspaceId: string,
       threadId: string,
-      _turnId: string | null,
+      turnId: string | null,
       run: HookRun,
     ) => {
       if (!hasStatusMessage(run)) {
         return;
       }
-      upsertHookItem(workspaceId, threadId, run, "running");
+      upsertHookItem(workspaceId, threadId, turnId, run, "running");
     },
     [upsertHookItem],
   );
@@ -132,7 +143,7 @@ export function useThreadHookEvents({
     (
       workspaceId: string,
       threadId: string,
-      _turnId: string | null,
+      turnId: string | null,
       run: HookRun,
     ) => {
       const itemId = `hook-${asString(run.id).trim()}`;
@@ -141,7 +152,7 @@ export function useThreadHookEvents({
         return;
       }
       const status = asString(run.status).trim().toLowerCase() || "completed";
-      upsertHookItem(workspaceId, threadId, run, status);
+      upsertHookItem(workspaceId, threadId, turnId, run, status);
     },
     [getItemsForThread, upsertHookItem],
   );

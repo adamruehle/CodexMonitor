@@ -69,6 +69,75 @@ describe("messageRenderUtils", () => {
     expect(summary.output).toContain("Robie [explorer]: completed");
   });
 
+  it("derives a readable action summary for line-range shell reads", () => {
+    const summary = buildToolSummary(
+      makeToolItem({
+        toolType: "commandExecution",
+        title: "Command: nl -ba marketplace-service-flows.html | sed -n '1988,2285p'",
+        detail: "/repo",
+      }),
+      "nl -ba marketplace-service-flows.html | sed -n '1988,2285p'",
+    );
+
+    expect(summary.label).toBe("read");
+    expect(summary.value).toBe("marketplace-service-flows.html lines 1988-2285");
+    expect(summary.rawCommand).toBe("nl -ba marketplace-service-flows.html | sed -n '1988,2285p'");
+  });
+
+  it("derives a readable action summary for grep-style searches", () => {
+    const command =
+      "rg -n '\"services\"|\"resources\"|\"audiences\"' marketplace-service-flows.html";
+    const summary = buildToolSummary(
+      makeToolItem({
+        toolType: "commandExecution",
+        title: `Command: ${command}`,
+        detail: "/repo",
+      }),
+      command,
+    );
+
+    expect(summary.label).toBe("search");
+    expect(summary.value).toBe('marketplace-service-flows.html for \'"services"|"resources"|"audiences"\'');
+  });
+
+  it("summarizes chained validation commands without hiding the raw command", () => {
+    const command =
+      "node --check tools/flow-viewer-headful.mjs && publisher-maui-plugin/node_modules/.bin/playwright --version";
+    const summary = buildToolSummary(
+      makeToolItem({
+        toolType: "commandExecution",
+        title: `Command: ${command}`,
+        detail: "/repo",
+      }),
+      command,
+    );
+
+    expect(summary.label).toBe("validate");
+    expect(summary.value).toBe(
+      "JavaScript syntax in flow-viewer-headful.mjs; inspect Playwright version",
+    );
+    expect(summary.detail).toBe(command);
+  });
+
+  it("derives summaries for generic exec_command tool calls", () => {
+    const summary = buildToolSummary(
+      makeToolItem({
+        toolType: "mcpToolCall",
+        title: "Tool: functions / exec_command",
+        detail: JSON.stringify({
+          cmd: "git diff -- src/features/messages/components/Messages.tsx",
+          workdir: "/repo",
+        }),
+        output: "diff --git ...",
+      }),
+      "",
+    );
+
+    expect(summary.label).toBe("inspect");
+    expect(summary.value).toBe("diff for Messages.tsx");
+    expect(summary.detail).toContain("workdir");
+  });
+
   it("keeps explicit final answers visible outside collapsed legacy work groups", () => {
     const items: ConversationItem[] = [
       {

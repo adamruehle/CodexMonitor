@@ -19,6 +19,7 @@ use crate::codex::config as codex_config;
 use crate::codex::home::{resolve_default_codex_home, resolve_workspace_codex_home};
 use crate::rules;
 use crate::shared::account::{build_account_response, read_auth_account};
+use crate::shared::claude_core;
 use crate::types::WorkspaceEntry;
 
 const LOGIN_START_TIMEOUT: Duration = Duration::from_secs(30);
@@ -179,6 +180,8 @@ struct ReplayedMessage {
 struct ReplayedTurnData {
     timeline: Vec<ReplayTimelineEntry>,
     messages: Vec<ReplayedMessage>,
+    terminal_status: Option<String>,
+    completed_at_ms: Option<i64>,
 }
 
 #[derive(Clone, Debug)]
@@ -242,22 +245,28 @@ fn enrich_thread_replay_items(thread: &mut Map<String, Value>) {
         let Some(replayed_turn) = replayed_by_turn.get(turn_id).cloned() else {
             continue;
         };
-        if replayed_turn.timeline.is_empty() {
-            continue;
+        if let Some(status) = &replayed_turn.terminal_status {
+            turn_obj.insert("status".to_string(), json!(status));
+            if let Some(completed_at_ms) = replayed_turn.completed_at_ms {
+                turn_obj
+                    .entry("completed_at".to_string())
+                    .or_insert_with(|| json!(completed_at_ms));
+            }
         }
-
-        let items = turn_obj
-            .entry("items".to_string())
-            .or_insert_with(|| Value::Array(Vec::new()));
-        let Some(items_array) = items.as_array_mut() else {
-            continue;
-        };
-        let merged_items = merge_replayed_turn_items(
-            items_array,
-            &replayed_turn.timeline,
-            &replayed_turn.messages,
-        );
-        *items_array = merged_items;
+        if !replayed_turn.timeline.is_empty() {
+            let items = turn_obj
+                .entry("items".to_string())
+                .or_insert_with(|| Value::Array(Vec::new()));
+            let Some(items_array) = items.as_array_mut() else {
+                continue;
+            };
+            let merged_items = merge_replayed_turn_items(
+                items_array,
+                &replayed_turn.timeline,
+                &replayed_turn.messages,
+            );
+            *items_array = merged_items;
+        }
     }
 }
 
@@ -290,11 +299,22 @@ fn load_replayed_thread_items(path: &Path) -> HashMap<String, ReplayedTurnData> 
         }
 
         let entry_type = value.get("type").and_then(Value::as_str).unwrap_or("");
+        let payload_object = value.get("payload").and_then(Value::as_object);
+        if entry_type == "event_msg" {
+            if let Some(payload) = payload_object {
+                replay_event_msg(
+                    &value,
+                    payload,
+                    current_turn_id.as_deref(),
+                    &mut replayed_by_turn,
+                );
+            }
+        }
         if entry_type != "response_item" {
             continue;
         }
 
-        let Some(payload) = value.get("payload").and_then(Value::as_object) else {
+        let Some(payload) = payload_object else {
             continue;
         };
         let payload_type = payload.get("type").and_then(Value::as_str).unwrap_or("");
@@ -438,6 +458,36 @@ fn load_replayed_thread_items(path: &Path) -> HashMap<String, ReplayedTurnData> 
     }
 
     replayed_by_turn
+}
+
+fn replay_event_msg(
+    value: &Value,
+    payload: &Map<String, Value>,
+    current_turn_id: Option<&str>,
+    replayed_by_turn: &mut HashMap<String, ReplayedTurnData>,
+) {
+    let payload_type = payload.get("type").and_then(Value::as_str).unwrap_or("");
+    let terminal_status = match payload_type {
+        "task_complete" => Some("completed"),
+        "task_failed" => Some("failed"),
+        "task_error" => Some("error"),
+        "task_canceled" | "task_cancelled" => Some("canceled"),
+        "task_stopped" => Some("stopped"),
+        "task_interrupted" | "turn_aborted" => Some("interrupted"),
+        _ => None,
+    };
+    let Some(terminal_status) = terminal_status else {
+        return;
+    };
+    let Some(turn_id) = extract_replay_turn_id(value)
+        .or_else(|| current_turn_id.map(str::to_string))
+        .filter(|turn_id| !turn_id.is_empty())
+    else {
+        return;
+    };
+    let turn_data = replayed_by_turn.entry(turn_id).or_default();
+    turn_data.terminal_status = Some(terminal_status.to_string());
+    turn_data.completed_at_ms = read_replay_event_completed_at_ms(value, payload);
 }
 
 fn replay_timeline_entry_order(entry: &ReplayTimelineEntry) -> usize {
@@ -604,6 +654,35 @@ fn read_replay_timestamp_ms(value: &Value) -> Option<i64> {
         .and_then(Value::as_str)
         .and_then(|text| DateTime::parse_from_rfc3339(text).ok())
         .map(|timestamp| timestamp.timestamp_millis())
+}
+
+fn read_replay_event_completed_at_ms(
+    value: &Value,
+    payload: &Map<String, Value>,
+) -> Option<i64> {
+    let raw = payload
+        .get("completed_at")
+        .or_else(|| payload.get("completedAt"));
+    if let Some(number) = raw.and_then(Value::as_i64) {
+        return Some(if number < 1_000_000_000_000 {
+            number * 1000
+        } else {
+            number
+        });
+    }
+    if let Some(number) = raw.and_then(Value::as_f64) {
+        if number.is_finite() && number > 0.0 {
+            return Some(if number < 1_000_000_000_000.0 {
+                (number * 1000.0).round() as i64
+            } else {
+                number.round() as i64
+            });
+        }
+    }
+    raw.and_then(Value::as_str)
+        .and_then(|text| DateTime::parse_from_rfc3339(text).ok())
+        .map(|timestamp| timestamp.timestamp_millis())
+        .or_else(|| read_replay_timestamp_ms(value))
 }
 
 fn extract_replay_message_phase(payload: &Map<String, Value>) -> Option<String> {
@@ -1128,6 +1207,9 @@ pub(crate) async fn resume_thread_core(
     workspace_id: String,
     thread_id: String,
 ) -> Result<Value, String> {
+    if claude_core::is_claude_thread_id(&thread_id) {
+        return claude_core::build_claude_thread_response(&thread_id);
+    }
     let session = get_session_clone(sessions, &workspace_id).await?;
     let params = json!({ "threadId": thread_id });
     let mut response = session
@@ -1146,6 +1228,9 @@ pub(crate) async fn read_thread_core(
     workspace_id: String,
     thread_id: String,
 ) -> Result<Value, String> {
+    if claude_core::is_claude_thread_id(&thread_id) {
+        return claude_core::build_claude_thread_response(&thread_id);
+    }
     let session = get_session_clone(sessions, &workspace_id).await?;
     let params = json!({ "threadId": thread_id });
     let mut response = session
@@ -1197,29 +1282,40 @@ pub(crate) async fn fork_thread_core(
 
 pub(crate) async fn list_threads_core(
     sessions: &Mutex<HashMap<String, Arc<WorkspaceSession>>>,
+    workspaces: &Mutex<HashMap<String, WorkspaceEntry>>,
     workspace_id: String,
     cursor: Option<String>,
     limit: Option<u32>,
     sort_key: Option<String>,
 ) -> Result<Value, String> {
-    let session = get_session_clone(sessions, &workspace_id).await?;
-    let params = json!({
-        "cursor": cursor,
-        "limit": limit,
-        "sortKey": sort_key,
-        // Keep interactive and sub-agent sessions visible across CLI versions so
-        // thread/list refreshes do not drop valid historical conversations.
-        // Intentionally exclude generic "subAgent" so parentless internal jobs
-        // (for example memory consolidation) do not leak back into app state.
-        "sourceKinds": THREAD_LIST_SOURCE_KINDS
-    });
-    let mut response = session
-        .send_request_for_workspace(&workspace_id, "thread/list", params)
-        .await?;
+    let workspace_roots = claude_core::workspace_roots(workspaces).await;
+    let mut response = match get_session_clone(sessions, &workspace_id).await {
+        Ok(session) => {
+            let params = json!({
+                "cursor": cursor,
+                "limit": limit,
+                "sortKey": sort_key,
+                // Keep interactive and sub-agent sessions visible across CLI versions so
+                // thread/list refreshes do not drop valid historical conversations.
+                // Intentionally exclude generic "subAgent" so parentless internal jobs
+                // (for example memory consolidation) do not leak back into app state.
+                "sourceKinds": THREAD_LIST_SOURCE_KINDS
+            });
+            session
+                .send_request_for_workspace(&workspace_id, "thread/list", params)
+                .await?
+        }
+        Err(_) => json!({
+            "result": {
+                "data": []
+            }
+        }),
+    };
     let session_titles = load_codex_session_title_index();
     if !session_titles.is_empty() {
         enrich_thread_response_titles(&mut response, &session_titles);
     }
+    claude_core::append_claude_threads_to_response(&mut response, &workspace_roots);
     Ok(response)
 }
 
@@ -2440,6 +2536,138 @@ mod tests {
                 "replay-agent-message-4",
             ]
         );
+
+        let _ = std::fs::remove_file(session_path);
+    }
+
+    #[test]
+    fn enrich_thread_response_replay_marks_aborted_turns_terminal() {
+        let session_path = write_temp_session_file(&[
+            json!({
+                "timestamp": "2026-05-01T17:31:53.058Z",
+                "type": "response_item",
+                "turn_id": "turn-aborted",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "please investigate" }]
+                }
+            })
+            .to_string(),
+            json!({
+                "timestamp": "2026-05-01T17:43:38.958Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "turn_aborted",
+                    "turn_id": "turn-aborted",
+                    "reason": "interrupted",
+                    "completed_at": 1777657418,
+                    "duration_ms": 353650
+                }
+            })
+            .to_string(),
+        ]);
+
+        let mut response = json!({
+            "result": {
+                "thread": {
+                    "id": "thread-aborted",
+                    "path": session_path,
+                    "turns": [
+                        {
+                            "id": "turn-aborted",
+                            "items": [
+                                {
+                                    "type": "userMessage",
+                                    "id": "item-user",
+                                    "content": [{ "type": "text", "text": "please investigate" }]
+                                },
+                                {
+                                    "type": "agentMessage",
+                                    "id": "item-stopped",
+                                    "text": "Session stopped."
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        });
+
+        enrich_thread_response_replay(&mut response);
+
+        let turn = &response["result"]["thread"]["turns"][0];
+        assert_eq!(turn["status"], json!("interrupted"));
+        assert_eq!(turn["completed_at"], json!(1777657418000_i64));
+
+        let _ = std::fs::remove_file(session_path);
+    }
+
+    #[test]
+    fn enrich_thread_response_replay_marks_task_complete_turns_terminal() {
+        let session_path = write_temp_session_file(&[
+            json!({
+                "timestamp": "2026-05-04T16:03:55.454Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "task_started",
+                    "turn_id": "turn-complete",
+                    "started_at": 1777910635
+                }
+            })
+            .to_string(),
+            json!({
+                "timestamp": "2026-05-04T16:05:18.976Z",
+                "type": "response_item",
+                "turn_id": "turn-complete",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "Final answer visible." }],
+                    "phase": "final_answer"
+                }
+            })
+            .to_string(),
+            json!({
+                "timestamp": "2026-05-04T16:05:19.140Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "task_complete",
+                    "turn_id": "turn-complete",
+                    "completed_at": 1777910719,
+                    "duration_ms": 83685
+                }
+            })
+            .to_string(),
+        ]);
+
+        let mut response = json!({
+            "result": {
+                "thread": {
+                    "id": "thread-complete",
+                    "path": session_path,
+                    "turns": [
+                        {
+                            "id": "turn-complete",
+                            "status": "running",
+                            "items": [
+                                {
+                                    "type": "agentMessage",
+                                    "id": "item-agent-final",
+                                    "text": "Final answer visible."
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        });
+
+        enrich_thread_response_replay(&mut response);
+
+        let turn = &response["result"]["thread"]["turns"][0];
+        assert_eq!(turn["status"], json!("completed"));
+        assert_eq!(turn["completed_at"], json!(1777910719000_i64));
 
         let _ = std::fs::remove_file(session_path);
     }

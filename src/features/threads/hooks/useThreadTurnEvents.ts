@@ -16,6 +16,8 @@ import {
 import {
   getLiveThreadSubagentSummaryPatch,
   getThreadStartAction,
+  isActiveThreadStatusType,
+  isInactiveThreadStatusType,
   normalizeThreadStatusType,
   resetThreadTurnState,
   shouldClearCompletedPlanForThread,
@@ -40,6 +42,21 @@ type UseThreadTurnEventsOptions = {
   safeMessageActivity: () => void;
   recordThreadActivity: (workspaceId: string, threadId: string, timestamp?: number) => void;
 };
+
+function normalizeActiveFlags(status: Record<string, unknown>) {
+  const raw =
+    status.activeFlags ??
+    status.active_flags ??
+    status.flags ??
+    status.activeStatusFlags ??
+    status.active_status_flags;
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  return raw
+    .map((flag) => (typeof flag === "string" ? flag.trim() : ""))
+    .filter((flag) => flag.length > 0);
+}
 
 export function useThreadTurnEvents({
   dispatch,
@@ -273,6 +290,11 @@ export function useThreadTurnEvents({
       }
       markTurnSettled?.(threadId, turnId || activeTurnId);
       markProcessing(threadId, false);
+      dispatch({
+        type: "clearRunningToolCalls",
+        threadId,
+        turnId: turnId || activeTurnId,
+      });
       resetThreadTurnState(
         {
           hasOptimisticActiveTurnByThreadRef,
@@ -303,15 +325,17 @@ export function useThreadTurnEvents({
       if (!statusType) {
         return;
       }
-      if (statusType === "active") {
+      const activeFlags = normalizeActiveFlags(status);
+      dispatch({
+        type: "setThreadActiveFlags",
+        threadId,
+        activeFlags: isActiveThreadStatusType(statusType) ? activeFlags : [],
+      });
+      if (isActiveThreadStatusType(statusType)) {
         markProcessing(threadId, true);
         return;
       }
-      if (
-        statusType === "idle" ||
-        statusType === "notloaded" ||
-        statusType === "systemerror"
-      ) {
+      if (isInactiveThreadStatusType(statusType)) {
         const activeTurnId = getLatestKnownActiveTurnId(threadId);
         markTurnSettled?.(threadId, activeTurnId);
         markProcessing(threadId, false);
@@ -319,6 +343,7 @@ export function useThreadTurnEvents({
           setThreadLoaded(threadId, false);
           markReviewing(threadId, false);
         }
+        dispatch({ type: "clearRunningToolCalls", threadId });
         resetThreadTurnState(
           {
             hasOptimisticActiveTurnByThreadRef,
@@ -331,6 +356,7 @@ export function useThreadTurnEvents({
       }
     },
     [
+      dispatch,
       markProcessing,
       markReviewing,
       getLatestKnownActiveTurnId,
@@ -346,6 +372,8 @@ export function useThreadTurnEvents({
       setThreadLoaded(threadId, false);
       markProcessing(threadId, false);
       markReviewing(threadId, false);
+      dispatch({ type: "setThreadActiveFlags", threadId, activeFlags: [] });
+      dispatch({ type: "clearRunningToolCalls", threadId });
       resetThreadTurnState(
         {
           hasOptimisticActiveTurnByThreadRef,
@@ -357,6 +385,7 @@ export function useThreadTurnEvents({
       setActiveTurnId(threadId, null);
     },
     [
+      dispatch,
       markProcessing,
       markReviewing,
       pendingInterruptsRef,
@@ -437,6 +466,12 @@ export function useThreadTurnEvents({
       dispatch({ type: "ensureThread", workspaceId, threadId });
       markProcessing(threadId, false);
       markReviewing(threadId, false);
+      dispatch({ type: "setThreadActiveFlags", threadId, activeFlags: [] });
+      dispatch({
+        type: "clearRunningToolCalls",
+        threadId,
+        turnId: turnId || activeTurnId,
+      });
       resetThreadTurnState(
         {
           hasOptimisticActiveTurnByThreadRef,

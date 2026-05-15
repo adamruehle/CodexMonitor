@@ -85,6 +85,8 @@ describe("useThreads UX integration", () => {
           updated_at: 9999,
           turns: [
             {
+              id: "turn-1",
+              status: "inProgress",
               items: [
                 {
                   type: "userMessage",
